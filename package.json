@@ -1,0 +1,59 @@
+{
+  "name": "my-media-app",
+  "version": "1.0.0",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "pack": "electron-builder --dir",
+    "build:update": "electron-builder --dir && node -e \"require('fs').copyFileSync('dist/win-unpacked/resources/app.asar', 'dist/app.asar'); console.log('✅ Update-Datei fertig: dist/app.asar');\"",
+    "build:native": "cmd /c scripts\\build_native.bat"
+  },
+  "dependencies": {
+    "fluent-ffmpeg": "^2.1.3",
+    "music-metadata": "^11.12.3",
+    "node-addon-api": "^8.9.2"
+  },
+  "devDependencies": {
+    "electron": "^41.1.0",
+    "electron-builder": "^25.1.8"
+  },
+  "build": {
+    "appId": "com.mymediaapp.player",
+    "npmRebuild": false,
+    "win": {
+      "target": "nsis"
+    },
+    "files": [
+      "main.js",
+      "src/**/*",
+      "assets/**/*",
+      "package.json"
+    ],
+    "fileAssociations": [
+      {
+        "ext": [
+          "mp3",
+          "wav",
+          "ogg",
+          "flac",
+          "m4a",
+          "wma"
+        ],
+        "name": "Audio-Datei",
+        "role": "Viewer"
+      },
+      {
+        "ext": [
+          "mp4",
+          "mkv",
+          "webm",
+          "avi",
+          "mov",
+          "flv"
+        ],
+        "name": "Video-Datei",
+        "role": "Viewer"
+      }
+    ]
+  }
+}

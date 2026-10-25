@@ -1,0 +1,25 @@
+# Dependencies
+node_modules/
+package-lock.json
+
+# Builds & Outputs
+dist/
+build/
+*.asar
+
+# Media files & Cache
+media/music/*
+!media/music/.gitkeep
+media/video/*
+!media/video/.gitkeep
+media/covers/*
+!media/covers/.gitkeep
+media/thumbnails/*
+media/snapshots/*
+media/debug_log.txt
+
+# Environment & Temp
+.env
+*.log
+.DS_Store
+Thumbs.db
