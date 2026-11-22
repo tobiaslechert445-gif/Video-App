@@ -614,7 +614,7 @@ function buildSystemCheckPayload() {
       title: "FFmpeg-Engine (MKV, Tonspuren & Thumbnails)",
       status: "err",
       summary: "Fehlt",
-      detail: `ffmpeg.exe nicht gefunden (erwartet unter ${bundledFfmpeg}). Multi-Audio, MKV-Konvertierung und Video-Thumbnails sind ohne FFmpeg nicht verfügbar.`
+      detail: `ffmpeg.exe nicht gefunden (erwartet unter ${bundledFfmpeg}). Klicke auf 'Automatisch reparieren', um ffmpeg.exe direkt von GitHub herunterzuladen und einzurichten.`
     }
   } else if (!ffmpegExecOk) {
     checkFfmpeg = {
@@ -733,20 +733,20 @@ function buildSystemCheckPayload() {
   try {
     presetCount = fs.readdirSync(path.join(mediaDir, "presets")).filter((n) => /\.png$/i.test(n)).length
   } catch (e) {}
-  const checkAssets = fontCount > 0 && presetCount > 0
+  const checkAssets = fontCount >= 9 && presetCount >= 7
     ? {
         id: "assets",
         title: "Zeichenstudio, Equalizer & Oberfläche",
         status: "ok",
         summary: `${fontCount} Fonts · ${presetCount} Presets`,
-        detail: "Schriftarten, Cursor-Presets sowie AudioContext-Equalizer sind einsatzbereit."
+        detail: "Alle Schriftarten, Cursor-Presets sowie AudioContext-Equalizer sind einsatzbereit."
       }
     : {
         id: "assets",
         title: "Zeichenstudio, Equalizer & Oberfläche",
         status: "warn",
-        summary: `${fontCount} Fonts · ${presetCount} Presets`,
-        detail: "Einige Font- oder Preset-Ressourcen in media\\fonts / media\\presets fehlen (Standard-Fallbacks aktiv)."
+        summary: `${fontCount}/9 Fonts · ${presetCount}/7 Presets`,
+        detail: "Einige Font- oder Preset-Ressourcen in media\\fonts / media\\presets fehlen – klicke auf 'Automatisch reparieren', um sie automatisch von GitHub nachzuladen."
       }
 
   let updaterStatus = "err"
@@ -785,9 +785,130 @@ function buildSystemCheckPayload() {
   }
 }
 
-function runSystemRepair(customFfmpegPath) {
-  const { mediaDir } = getBridgePaths()
+function notifyElectronRepairProgress(label, percent, downloadedBytes, totalBytes) {
+  try {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      const payload = JSON.stringify({
+        label,
+        percent: Math.min(100, Math.max(0, Math.round(percent || 0))),
+        downloadedBytes: downloadedBytes || 0,
+        totalBytes: totalBytes || 0
+      })
+      mainWindow.webContents.executeJavaScript(`window.__onSystemRepairProgress && window.__onSystemRepairProgress(${payload});`).catch(() => {})
+    }
+  } catch (e) {}
+}
+
+async function downloadGithubAssetElectron(cleanRepo, token, assetName, destFile, expectedSize, label) {
+  try { fs.unlinkSync(destFile) } catch (e) {}
+  let url = `https://github.com/${cleanRepo}/releases/latest/download/${assetName}`
+  const headers = { "User-Agent": "My-Media-App-Updater" }
+  if (token) {
+    headers["Authorization"] = `Bearer ${token}`
+    const relRes = await fetch(`https://api.github.com/repos/${cleanRepo}/releases?per_page=8`, {
+      headers: { ...headers, Accept: "application/vnd.github.v3+json" }
+    })
+    if (relRes.ok) {
+      const releases = await relRes.json()
+      for (const rel of (Array.isArray(releases) ? releases : [])) {
+        const found = (rel.assets || []).find((a) => String(a.name || "").toLowerCase() === assetName.toLowerCase())
+        if (found) {
+          url = `https://api.github.com/repos/${cleanRepo}/releases/assets/${found.id}`
+          headers["Accept"] = "application/octet-stream"
+          if (found.size > 0) expectedSize = found.size
+          break
+        }
+      }
+    }
+  }
+
+  let res = await fetch(url, { headers, redirect: "follow" })
+  if (!res.ok && !token) {
+    const relRes = await fetch(`https://api.github.com/repos/${cleanRepo}/releases?per_page=8`, {
+      headers: { "User-Agent": "My-Media-App-Updater", Accept: "application/vnd.github.v3+json" }
+    })
+    if (relRes.ok) {
+      const releases = await relRes.json()
+      for (const rel of (Array.isArray(releases) ? releases : [])) {
+        const found = (rel.assets || []).find((a) => String(a.name || "").toLowerCase() === assetName.toLowerCase())
+        if (found && found.browser_download_url) {
+          if (found.size > 0) expectedSize = found.size
+          res = await fetch(found.browser_download_url, { headers, redirect: "follow" })
+          break
+        }
+      }
+    }
+  }
+
+  if (!res.ok) {
+    throw new Error(`HTTP ${res.status}`)
+  }
+
+  const totalBytes = parseInt(res.headers.get("content-length") || "0", 10) || expectedSize || 0
+  let downloadedBytes = 0
+  notifyElectronRepairProgress(label, 1, 0, totalBytes)
+
+  const progressStream = new Transform({
+    transform(chunk, encoding, callback) {
+      downloadedBytes += chunk.length
+      const pct = totalBytes > 0 ? Math.min(99, Math.round((downloadedBytes * 100) / totalBytes)) : 50
+      notifyElectronRepairProgress(label, pct, downloadedBytes, totalBytes)
+      callback(null, chunk)
+    }
+  })
+
+  await pipeline(Readable.fromWeb(res.body), progressStream, fs.createWriteStream(destFile))
+  const finalSize = fs.existsSync(destFile) ? fs.statSync(destFile).size : 0
+  if (finalSize < 256) {
+    try { fs.unlinkSync(destFile) } catch (e) {}
+    throw new Error("Heruntergeladene Datei ist leer")
+  }
+  notifyElectronRepairProgress(label, 100, finalSize, Math.max(totalBytes, finalSize))
+  return finalSize
+}
+
+function copyMissingFilesInDirNode(srcDir, dstDir) {
+  let copied = 0
+  try {
+    if (!fs.existsSync(srcDir)) return 0
+    fs.mkdirSync(dstDir, { recursive: true })
+    for (const entry of fs.readdirSync(srcDir, { withFileTypes: true })) {
+      if (entry.isFile()) {
+        const dest = path.join(dstDir, entry.name)
+        if (!fs.existsSync(dest)) {
+          fs.copyFileSync(path.join(srcDir, entry.name), dest)
+          copied++
+        }
+      }
+    }
+  } catch (e) {}
+  return copied
+}
+
+function extractZipArchiveNode(zipPath, extractDir) {
+  try { fs.rmSync(extractDir, { recursive: true, force: true }) } catch (e) {}
+  fs.mkdirSync(extractDir, { recursive: true })
+  try {
+    const r = spawnSync("tar.exe", ["-xf", zipPath, "-C", extractDir], { windowsHide: true })
+    if (r.status === 0) return true
+  } catch (e) {}
+  try {
+    const ps = `Expand-Archive -LiteralPath '${zipPath.replace(/'/g, "''")}' -DestinationPath '${extractDir.replace(/'/g, "''")}' -Force`
+    const r = spawnSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", ps], { windowsHide: true })
+    return r.status === 0
+  } catch (e) {
+    return false
+  }
+}
+
+async function runSystemRepairAsync(opts = {}) {
+  const { appDir, mediaDir } = getBridgePaths()
   const repairedActions = []
+  const rawRepo = String((opts && opts.repo) || "tobiaslechert445-gif/Video-App").trim()
+  const cleanRepo = rawRepo.replace(/^https?:\/\/github\.com\//i, "").replace(/\.git$/i, "").replace(/^\/+|\/+$/g, "").trim()
+  const token = String((opts && opts.token) || "").trim()
+  const customFfmpegPath = opts && opts.customFfmpegPath
+
   for (const sub of ["video", "music", "covers", "snapshots", "references", "logo", "cursor", "fonts", "presets", ".mkv_cache", ".sub_cache"]) {
     const d = path.join(mediaDir, sub)
     if (!fs.existsSync(d)) {
@@ -797,6 +918,8 @@ function runSystemRepair(customFfmpegPath) {
       } catch (e) {}
     }
   }
+  try { fs.mkdirSync(path.join(appDir, "assets"), { recursive: true }) } catch (e) {}
+
   clearFfmpegAndProbeCaches()
   const destFfmpeg = path.join(mediaDir, "video", "ffmpeg.exe")
   const custom = String(customFfmpegPath || "").trim()
@@ -809,9 +932,69 @@ function runSystemRepair(customFfmpegPath) {
     const found = findFfmpeg(mediaDir)
     if (found && normalizePathKey(found) !== normalizePathKey(destFfmpeg)) {
       fs.copyFileSync(found, destFfmpeg)
-      repairedActions.push(`FFmpeg automatisch von ${found} nach ${destFfmpeg} kopiert`)
+      repairedActions.push(`FFmpeg automatisch lokal von ${found} nach ${destFfmpeg} kopiert`)
     }
   }
+
+  if (!fs.existsSync(destFfmpeg) && cleanRepo) {
+    const tmpFfmpeg = path.join(mediaDir, "video", "ffmpeg.download.tmp.exe")
+    try {
+      const bytes = await downloadGithubAssetElectron(
+        cleanRepo,
+        token,
+        "ffmpeg.exe",
+        tmpFfmpeg,
+        101060096,
+        "⬇️ Lade fehlende ffmpeg.exe von GitHub herunter…"
+      )
+      const head = Buffer.alloc(2)
+      const fd = fs.openSync(tmpFfmpeg, "r")
+      fs.readSync(fd, head, 0, 2, 0)
+      fs.closeSync(fd)
+      if (head.toString("ascii") === "MZ") {
+        fs.renameSync(tmpFfmpeg, destFfmpeg)
+        repairedActions.push(`ffmpeg.exe automatisch von GitHub heruntergeladen (${(bytes / (1024 * 1024)).toFixed(1)} MB) & installiert`)
+      } else {
+        try { fs.unlinkSync(tmpFfmpeg) } catch (e) {}
+      }
+    } catch (e) {
+      try { fs.unlinkSync(tmpFfmpeg) } catch (err) {}
+      repairedActions.push(`FFmpeg GitHub-Download fehlgeschlagen: ${e.message}`)
+    }
+  }
+
+  const countAssets = () => {
+    let f = 0, p = 0
+    try { f = fs.readdirSync(path.join(mediaDir, "fonts")).filter((n) => /\.(ttf|otf)$/i.test(n)).length } catch (e) {}
+    try { p = fs.readdirSync(path.join(mediaDir, "presets")).filter((n) => /\.png$/i.test(n)).length } catch (e) {}
+    return { f, p }
+  }
+
+  let { f: fontCount, p: presetCount } = countAssets()
+  if ((fontCount < 9 || presetCount < 7 || !fs.existsSync(path.join(appDir, "assets", "logo.png")) || (opts && opts.forceGithubAssets)) && cleanRepo) {
+    const tmpZip = path.join(os.tmpdir(), "my_view_assets_repair.zip")
+    const extractDir = path.join(os.tmpdir(), "my_view_assets_extract")
+    try {
+      await downloadGithubAssetElectron(
+        cleanRepo,
+        token,
+        "my_view_assets.zip",
+        tmpZip,
+        1160000,
+        "⬇️ Lade fehlende Studio-Ressourcen (Fonts & Presets) von GitHub…"
+      )
+      if (extractZipArchiveNode(tmpZip, extractDir)) {
+        const cf = copyMissingFilesInDirNode(path.join(extractDir, "fonts"), path.join(mediaDir, "fonts"))
+        const cp = copyMissingFilesInDirNode(path.join(extractDir, "presets"), path.join(mediaDir, "presets"))
+        const cv = copyMissingFilesInDirNode(path.join(extractDir, "video"), path.join(mediaDir, "video"))
+        const ca = copyMissingFilesInDirNode(path.join(extractDir, "assets"), path.join(appDir, "assets"))
+        repairedActions.push(`Studio-Ressourcen von GitHub geladen (${cf} Fonts, ${cp} Presets, ${cv + ca} Hilfsdateien ergänzt)`)
+      }
+    } catch (e) {}
+    try { fs.unlinkSync(tmpZip) } catch (e) {}
+    try { fs.rmSync(extractDir, { recursive: true, force: true }) } catch (e) {}
+  }
+
   for (const sub of [".mkv_cache", ".sub_cache"]) {
     const d = path.join(mediaDir, sub)
     try {
@@ -871,7 +1054,7 @@ function startStreamBridgeServer() {
 
       if (pathname === '/api/system-repair') {
         const body = await readBridgeJsonBody(req);
-        sendBridgeJson(res, 200, runSystemRepair(body.customFfmpegPath));
+        sendBridgeJson(res, 200, await runSystemRepairAsync(body));
         return;
       }
 
@@ -1758,7 +1941,7 @@ ipcMain.handle("run-system-check", async () => {
 
 ipcMain.handle("run-system-repair", async (event, opts = {}) => {
   try {
-    return runSystemRepair(opts && opts.customFfmpegPath);
+    return await runSystemRepairAsync(opts || {});
   } catch (err) {
     return { ok: false, allReady: false, error: err.message, checks: [], repairedActions: [] };
   }

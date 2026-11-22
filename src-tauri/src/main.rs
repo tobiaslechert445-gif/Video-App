@@ -3004,7 +3004,7 @@ fn build_system_check_payload(app: &AppHandle) -> Value {
             "title": "FFmpeg-Engine (MKV, Tonspuren & Thumbnails)",
             "status": "err",
             "summary": "Fehlt",
-            "detail": format!("ffmpeg.exe nicht gefunden (erwartet unter {}). Multi-Audio, MKV-Konvertierung und Video-Thumbnails sind ohne FFmpeg nicht verfügbar.", bundled_ffmpeg.to_string_lossy())
+            "detail": format!("ffmpeg.exe nicht gefunden (erwartet unter {}). Klicke auf 'Automatisch reparieren', um ffmpeg.exe direkt von GitHub herunterzuladen und einzurichten.", bundled_ffmpeg.to_string_lossy())
         }),
     };
 
@@ -3129,21 +3129,21 @@ fn build_system_check_payload(app: &AppHandle) -> Value {
                 .count()
         })
         .unwrap_or(0);
-    let check_assets = if font_count > 0 && preset_count > 0 {
+    let check_assets = if font_count >= 9 && preset_count >= 7 {
         json!({
             "id": "assets",
             "title": "Zeichenstudio, Equalizer & Oberfläche",
             "status": "ok",
             "summary": format!("{} Fonts · {} Presets", font_count, preset_count),
-            "detail": "Schriftarten, Cursor-Presets sowie AudioContext-Equalizer sind einsatzbereit."
+            "detail": "Alle Schriftarten, Cursor-Presets sowie AudioContext-Equalizer sind einsatzbereit."
         })
     } else {
         json!({
             "id": "assets",
             "title": "Zeichenstudio, Equalizer & Oberfläche",
             "status": "warn",
-            "summary": format!("{} Fonts · {} Presets", font_count, preset_count),
-            "detail": "Einige Font- oder Preset-Ressourcen in media\\fonts / media\\presets fehlen (Standard-Fallbacks aktiv)."
+            "summary": format!("{}/9 Fonts · {}/7 Presets", font_count, preset_count),
+            "detail": "Einige Font- oder Preset-Ressourcen in media\\fonts / media\\presets fehlen – klicke auf 'Automatisch reparieren', um sie automatisch von GitHub nachzuladen."
         })
     };
 
@@ -3211,9 +3211,267 @@ fn handle_system_check_api(req: Request, app: &AppHandle) {
     respond_json(req, 200, payload);
 }
 
+fn notify_repair_progress(app: &AppHandle, label: &str, percent: u64, downloaded: u64, total: u64) {
+    if let Some(win) = app.get_webview_window("main") {
+        let payload = json!({
+            "label": label,
+            "percent": percent.min(100),
+            "downloadedBytes": downloaded,
+            "totalBytes": total
+        });
+        let script = format!(
+            "window.__onSystemRepairProgress && window.__onSystemRepairProgress({});",
+            payload
+        );
+        let _ = win.eval(&script);
+    }
+}
+
+fn lookup_github_asset_across_releases(clean_repo: &str, token: &str, asset_name: &str) -> Option<(String, u64, bool)> {
+    let api_url = format!("https://api.github.com/repos/{}/releases?per_page=8", clean_repo);
+    let mut cfg = String::from(
+        "header = \"User-Agent: My-Media-App-Updater\"\nheader = \"Accept: application/vnd.github.v3+json\"\n",
+    );
+    if !token.is_empty() {
+        cfg.push_str(&format!(
+            "header = \"Authorization: Bearer {}\"\n",
+            sanitize_curl_header_val(token)
+        ));
+    }
+    let mut cmd = Command::new("curl.exe");
+    cmd.args(["-sSL", "-K", "-", &api_url])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    #[cfg(target_os = "windows")]
+    cmd.creation_flags(CREATE_NO_WINDOW);
+
+    let mut child = cmd.spawn().ok()?;
+    if let Some(mut stdin) = child.stdin.take() {
+        let _ = stdin.write_all(cfg.as_bytes());
+    }
+    let out = child.wait_with_output().ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let releases: Value = serde_json::from_slice(&out.stdout).ok()?;
+    let rel_arr = releases.as_array()?;
+    for rel in rel_arr {
+        if let Some(assets) = rel.get("assets").and_then(|v| v.as_array()) {
+            for asset in assets {
+                let name = asset.get("name").and_then(|v| v.as_str()).unwrap_or("");
+                if name.eq_ignore_ascii_case(asset_name) {
+                    let size = asset.get("size").and_then(|v| v.as_u64()).unwrap_or(0);
+                    if !token.is_empty() {
+                        if let Some(id) = asset.get("id").and_then(|v| v.as_u64()) {
+                            return Some((
+                                format!("https://api.github.com/repos/{}/releases/assets/{}", clean_repo, id),
+                                size,
+                                true,
+                            ));
+                        }
+                    }
+                    if let Some(dl_url) = asset.get("browser_download_url").and_then(|v| v.as_str()) {
+                        return Some((dl_url.to_string(), size, false));
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+fn run_curl_asset_download(
+    app: &AppHandle,
+    url: &str,
+    token: &str,
+    use_api_accept: bool,
+    dest_file: &Path,
+    expected_size: u64,
+    label: &str,
+) -> Result<u64, String> {
+    let _ = fs::remove_file(dest_file);
+    let mut cfg = String::from("header = \"User-Agent: My-Media-App-Updater\"\n");
+    if use_api_accept {
+        cfg.push_str("header = \"Accept: application/octet-stream\"\n");
+    }
+    if !token.is_empty() {
+        cfg.push_str(&format!(
+            "header = \"Authorization: Bearer {}\"\n",
+            sanitize_curl_header_val(token)
+        ));
+    }
+
+    let dest_str = dest_file.to_string_lossy().to_string();
+    let mut cmd = Command::new("curl.exe");
+    cmd.args(["-sSL", "-w", "%{http_code}", "-o", &dest_str, "-K", "-", url])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    #[cfg(target_os = "windows")]
+    cmd.creation_flags(CREATE_NO_WINDOW);
+
+    let mut child = cmd
+        .spawn()
+        .map_err(|e| format!("curl.exe konnte nicht gestartet werden: {}", e))?;
+    if let Some(mut stdin) = child.stdin.take() {
+        let _ = stdin.write_all(cfg.as_bytes());
+    }
+
+    notify_repair_progress(app, label, 1, 0, expected_size);
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) => {
+                let cur_bytes = fs::metadata(dest_file).map(|m| m.len()).unwrap_or(0);
+                let pct = if expected_size > 0 {
+                    (cur_bytes.saturating_mul(100) / expected_size).min(99)
+                } else {
+                    50
+                };
+                notify_repair_progress(app, label, pct, cur_bytes, expected_size);
+                thread::sleep(Duration::from_millis(200));
+            }
+            Err(_) => break,
+        }
+    }
+
+    let out = child
+        .wait_with_output()
+        .map_err(|e| format!("Download-Fehler: {}", e))?;
+    let status_code = String::from_utf8_lossy(&out.stdout)
+        .trim()
+        .parse::<u16>()
+        .unwrap_or(0);
+    let final_size = fs::metadata(dest_file).map(|m| m.len()).unwrap_or(0);
+
+    if !out.status.success() || status_code != 200 || final_size < 256 {
+        let _ = fs::remove_file(dest_file);
+        return Err(format!("HTTP {} (Größe: {} Bytes)", status_code, final_size));
+    }
+
+    notify_repair_progress(app, label, 100, final_size, expected_size.max(final_size));
+    Ok(final_size)
+}
+
+fn download_github_asset_with_progress(
+    app: &AppHandle,
+    clean_repo: &str,
+    token: &str,
+    asset_name: &str,
+    dest_file: &Path,
+    expected_size: u64,
+    label: &str,
+) -> Result<u64, String> {
+    if token.is_empty() {
+        let direct_url = format!(
+            "https://github.com/{}/releases/latest/download/{}",
+            clean_repo, asset_name
+        );
+        if let Ok(sz) = run_curl_asset_download(app, &direct_url, "", false, dest_file, expected_size, label) {
+            return Ok(sz);
+        }
+    }
+
+    if let Some((api_url, api_size, use_api_accept)) =
+        lookup_github_asset_across_releases(clean_repo, token, asset_name)
+    {
+        let total = if api_size > 0 { api_size } else { expected_size };
+        return run_curl_asset_download(app, &api_url, token, use_api_accept, dest_file, total, label);
+    }
+
+    Err(format!(
+        "Asset '{}' wurde in den GitHub-Releases von {} nicht gefunden.",
+        asset_name, clean_repo
+    ))
+}
+
+fn copy_missing_files_in_dir(src_dir: &Path, dst_dir: &Path) -> usize {
+    let mut copied = 0usize;
+    let Ok(entries) = fs::read_dir(src_dir) else {
+        return 0;
+    };
+    let _ = fs::create_dir_all(dst_dir);
+    for entry in entries.flatten() {
+        let p = entry.path();
+        if p.is_file() {
+            let dest = dst_dir.join(entry.file_name());
+            if !dest.is_file() && fs::copy(&p, &dest).is_ok() {
+                copied += 1;
+            }
+        }
+    }
+    copied
+}
+
+fn extract_zip_archive(zip_path: &Path, extract_dir: &Path) -> bool {
+    let _ = fs::remove_dir_all(extract_dir);
+    let _ = fs::create_dir_all(extract_dir);
+
+    let mut tar_cmd = Command::new("tar.exe");
+    tar_cmd.args([
+        "-xf",
+        &zip_path.to_string_lossy(),
+        "-C",
+        &extract_dir.to_string_lossy(),
+    ]);
+    #[cfg(target_os = "windows")]
+    tar_cmd.creation_flags(CREATE_NO_WINDOW);
+    if let Ok(out) = tar_cmd.output() {
+        if out.status.success() {
+            return true;
+        }
+    }
+
+    let ps_script = format!(
+        "Expand-Archive -LiteralPath '{}' -DestinationPath '{}' -Force",
+        zip_path.to_string_lossy().replace('\'', "''"),
+        extract_dir.to_string_lossy().replace('\'', "''")
+    );
+    let mut ps_cmd = Command::new("powershell.exe");
+    ps_cmd.args(["-NoProfile", "-NonInteractive", "-Command", &ps_script]);
+    #[cfg(target_os = "windows")]
+    ps_cmd.creation_flags(CREATE_NO_WINDOW);
+    ps_cmd.output().map(|o| o.status.success()).unwrap_or(false)
+}
+
+fn count_media_assets(media_dir: &Path) -> (usize, usize) {
+    let font_count = fs::read_dir(media_dir.join("fonts"))
+        .ok()
+        .map(|rd| {
+            rd.flatten()
+                .filter(|e| {
+                    let n = e.file_name().to_string_lossy().to_lowercase();
+                    n.ends_with(".ttf") || n.ends_with(".otf")
+                })
+                .count()
+        })
+        .unwrap_or(0);
+    let preset_count = fs::read_dir(media_dir.join("presets"))
+        .ok()
+        .map(|rd| {
+            rd.flatten()
+                .filter(|e| e.file_name().to_string_lossy().to_lowercase().ends_with(".png"))
+                .count()
+        })
+        .unwrap_or(0);
+    (font_count, preset_count)
+}
+
 fn handle_system_repair_api(req: Request, app: &AppHandle, body: Value) {
-    let (_app_dir, media_dir, _exe_path, _pkg) = resolve_app_paths();
+    let (app_dir, media_dir, _exe_path, _pkg) = resolve_app_paths();
     let mut repaired_actions: Vec<String> = Vec::new();
+    let raw_repo = body
+        .get("repo")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or("tobiaslechert445-gif/Video-App");
+    let clean_repo = clean_github_repo(raw_repo);
+    let token = body
+        .get("token")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim();
 
     for sub in [
         "video",
@@ -3233,6 +3491,7 @@ fn handle_system_repair_api(req: Request, app: &AppHandle, body: Value) {
             repaired_actions.push(format!("Ordner erstellt: {}", dir.to_string_lossy()));
         }
     }
+    let _ = fs::create_dir_all(app_dir.join("assets"));
 
     clear_ffmpeg_and_probe_caches();
     let dest_ffmpeg = media_dir.join("video").join("ffmpeg.exe");
@@ -3258,13 +3517,107 @@ fn handle_system_repair_api(req: Request, app: &AppHandle, body: Value) {
             if !found.to_string_lossy().eq_ignore_ascii_case(&dest_ffmpeg.to_string_lossy()) {
                 if fs::copy(&found, &dest_ffmpeg).is_ok() {
                     repaired_actions.push(format!(
-                        "FFmpeg automatisch von {} nach {} kopiert",
+                        "FFmpeg automatisch lokal von {} nach {} kopiert",
                         found.to_string_lossy(),
                         dest_ffmpeg.to_string_lossy()
                     ));
                 }
             }
         }
+    }
+
+    // Falls ffmpeg.exe weiterhin fehlt: Automatisch von GitHub herunterladen!
+    if !dest_ffmpeg.is_file() && !clean_repo.is_empty() {
+        let tmp_ffmpeg = media_dir.join("video").join("ffmpeg.download.tmp.exe");
+        match download_github_asset_with_progress(
+            app,
+            &clean_repo,
+            token,
+            "ffmpeg.exe",
+            &tmp_ffmpeg,
+            101_060_096,
+            "⬇️ Lade fehlende ffmpeg.exe von GitHub herunter…",
+        ) {
+            Ok(bytes) => {
+                if is_valid_pe_exe(&tmp_ffmpeg) && fs::rename(&tmp_ffmpeg, &dest_ffmpeg).is_ok() {
+                    repaired_actions.push(format!(
+                        "ffmpeg.exe automatisch von GitHub heruntergeladen ({:.1} MB) & installiert",
+                        bytes as f64 / (1024.0 * 1024.0)
+                    ));
+                } else {
+                    let _ = fs::remove_file(&tmp_ffmpeg);
+                    repaired_actions.push("GitHub-Download von ffmpeg.exe war keine gültige Windows-EXE".to_string());
+                }
+            }
+            Err(e) => {
+                let _ = fs::remove_file(&tmp_ffmpeg);
+                repaired_actions.push(format!("FFmpeg GitHub-Download fehlgeschlagen: {}", e));
+            }
+        }
+    }
+
+    // Prüfe Fonts, Cursor-Presets, Video-Hilfsskripte & Logos
+    let (mut font_count, mut preset_count) = count_media_assets(&media_dir);
+    let logo_missing = !app_dir.join("assets").join("logo.png").is_file();
+    if font_count < 9 || preset_count < 7 || logo_missing {
+        // 1. Lokales Starter-Template prüfen (falls vorhanden)
+        let mut template_roots = vec![app_dir.join("My_View_Starter_Template")];
+        if let Some(parent) = app_dir.parent() {
+            template_roots.push(parent.join("My_View_Starter_Template"));
+        }
+        for tpl in template_roots {
+            if tpl.is_dir() {
+                let c_fonts = copy_missing_files_in_dir(&tpl.join("media").join("fonts"), &media_dir.join("fonts"));
+                let c_presets = copy_missing_files_in_dir(&tpl.join("media").join("presets"), &media_dir.join("presets"));
+                let c_video = copy_missing_files_in_dir(&tpl.join("media").join("video"), &media_dir.join("video"));
+                let c_assets = copy_missing_files_in_dir(&tpl.join("assets"), &app_dir.join("assets"));
+                if c_fonts + c_presets + c_video + c_assets > 0 {
+                    repaired_actions.push(format!(
+                        "Ressourcen lokal wiederhergestellt ({} Fonts, {} Presets, {} Assets)",
+                        c_fonts,
+                        c_presets,
+                        c_video + c_assets
+                    ));
+                }
+            }
+        }
+        let counts = count_media_assets(&media_dir);
+        font_count = counts.0;
+        preset_count = counts.1;
+    }
+
+    let force_gh_assets = body.get("forceGithubAssets").and_then(|v| v.as_bool()).unwrap_or(false);
+    if (font_count < 9 || preset_count < 7 || !app_dir.join("assets").join("logo.png").is_file() || force_gh_assets)
+        && !clean_repo.is_empty()
+    {
+        let tmp_zip = std::env::temp_dir().join("my_view_assets_repair.zip");
+        let extract_dir = std::env::temp_dir().join("my_view_assets_extract");
+        if download_github_asset_with_progress(
+            app,
+            &clean_repo,
+            token,
+            "my_view_assets.zip",
+            &tmp_zip,
+            1_160_000,
+            "⬇️ Lade fehlende Studio-Ressourcen (Fonts & Presets) von GitHub…",
+        )
+        .is_ok()
+        {
+            if extract_zip_archive(&tmp_zip, &extract_dir) {
+                let c_fonts = copy_missing_files_in_dir(&extract_dir.join("fonts"), &media_dir.join("fonts"));
+                let c_presets = copy_missing_files_in_dir(&extract_dir.join("presets"), &media_dir.join("presets"));
+                let c_video = copy_missing_files_in_dir(&extract_dir.join("video"), &media_dir.join("video"));
+                let c_assets = copy_missing_files_in_dir(&extract_dir.join("assets"), &app_dir.join("assets"));
+                repaired_actions.push(format!(
+                    "Studio-Ressourcen von GitHub geladen ({} Fonts, {} Presets, {} Hilfsdateien ergänzt)",
+                    c_fonts,
+                    c_presets,
+                    c_video + c_assets
+                ));
+            }
+        }
+        let _ = fs::remove_file(&tmp_zip);
+        let _ = fs::remove_dir_all(&extract_dir);
     }
 
     for cache_sub in [".mkv_cache", ".sub_cache"] {

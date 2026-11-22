@@ -19830,16 +19830,51 @@ window.runAppSystemCheck = async function(silent = true) {
   }
 };
 
+window.__onSystemRepairProgress = function(data) {
+  const cont = document.getElementById("sysCheckRepairProgressCont");
+  const lbl = document.getElementById("sysCheckRepairProgressLabel");
+  const pctEl = document.getElementById("sysCheckRepairProgressPercent");
+  const bar = document.getElementById("sysCheckRepairProgressBar");
+  if (!data) return;
+  if (cont) cont.classList.remove("hidden");
+  const pct = Math.min(100, Math.max(0, Number(data.percent) || 0));
+  if (bar) bar.style.width = `${pct}%`;
+  if (pctEl) pctEl.innerText = `${pct}%`;
+  if (lbl) {
+    let txt = data.label || "⬇️ Lade fehlende Komponenten von GitHub…";
+    if (data.totalBytes > 0) {
+      const dlMB = ((data.downloadedBytes || 0) / (1024 * 1024)).toFixed(1);
+      const totMB = (data.totalBytes / (1024 * 1024)).toFixed(1);
+      txt += ` (${dlMB} MB / ${totMB} MB)`;
+    }
+    lbl.innerText = txt;
+  }
+};
+
+window.openGithubReleasesPage = function() {
+  const rawRepo = (typeof getUpdateRepo === "function" && getUpdateRepo()) || "tobiaslechert445-gif/Video-App";
+  const cleanRepo = String(rawRepo).replace(/^https?:\/\/github\.com\//i, "").replace(/\.git$/i, "").replace(/^\/+|\/+$/g, "").trim() || "tobiaslechert445-gif/Video-App";
+  const url = `https://github.com/${cleanRepo}/releases/latest`;
+  if (typeof shell !== "undefined" && shell && typeof shell.openExternal === "function") {
+    shell.openExternal(url);
+  } else {
+    window.open(url, "_blank");
+  }
+};
+
 window.runAppSystemRepair = async function() {
   const btn = document.getElementById("btnRepairSysCheck");
   const badge = document.getElementById("sysCheckSummaryBadge");
+  const progCont = document.getElementById("sysCheckRepairProgressCont");
   if (btn) btn.disabled = true;
   if (badge) {
     badge.className = "sys-check-badge";
-    badge.innerText = "Repariere…";
+    badge.innerText = "Repariere & lade von GitHub…";
   }
   try {
-    const res = await invokeSystemCheckEndpoint("/api/system-repair", "run-system-repair", {});
+    const repo = typeof getUpdateRepo === "function" ? getUpdateRepo() : "tobiaslechert445-gif/Video-App";
+    const token = typeof getUpdateToken === "function" ? getUpdateToken() : "";
+    const res = await invokeSystemCheckEndpoint("/api/system-repair", "run-system-repair", { repo, token });
     window.renderSystemCheckResults(res);
     const actions = Array.isArray(res && res.repairedActions) ? res.repairedActions : [];
     if (typeof showVideoToast === "function") {
@@ -19848,7 +19883,7 @@ window.runAppSystemRepair = async function() {
       } else if (res && res.allReady) {
         showVideoToast("✅ Alles bereits in Ordnung – Caches & Pfade aktualisiert.");
       } else {
-        showVideoToast("⚠️ Konnte nicht alle Probleme automatisch lösen (z. B. fehlende ffmpeg.exe).");
+        showVideoToast("⚠️ Konnte nicht alle Probleme automatisch lösen.");
       }
     }
     if (videoTrackState && videoTrackState.mediaPath && typeof window.probeAndLoadVideoTracks === "function") {
@@ -19862,6 +19897,9 @@ window.runAppSystemRepair = async function() {
     return null;
   } finally {
     if (btn) btn.disabled = false;
+    if (progCont) {
+      setTimeout(() => progCont.classList.add("hidden"), 900);
+    }
   }
 };
 

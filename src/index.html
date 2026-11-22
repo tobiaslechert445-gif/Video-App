@@ -2259,9 +2259,22 @@ My View
                             <button id="btnRepairSysCheck" class="modalBtn primary" onclick="runAppSystemRepair()" style="padding: 7px 12px; font-size: 12px;">
                                 🔧 Automatisch reparieren
                             </button>
+                            <button id="btnOpenGithubReleases" class="modalBtn" onclick="openGithubReleasesPage()" style="background: #222; border: 1px solid rgba(255,255,255,0.12); padding: 7px 12px; font-size: 12px;" title="Alle wichtigen Dateien &amp; das Komplettpaket auf GitHub im Browser öffnen">
+                                🌐 GitHub-Downloads
+                            </button>
                             <button id="btnPickFfmpegFile" class="modalBtn hidden" onclick="pickAndInstallFfmpeg()" style="background: #332211; border: 1px solid rgba(251, 191, 36, 0.45); color: #fde68a; padding: 7px 12px; font-size: 12px;">
                                 📁 ffmpeg.exe auswählen
                             </button>
+                        </div>
+                    </div>
+
+                    <div id="sysCheckRepairProgressCont" class="hidden" style="margin-bottom: 14px; padding: 10px 12px; border-radius: 8px; background: rgba(0,0,0,0.35); border: 1px solid rgba(29, 185, 84, 0.35);">
+                        <div style="display: flex; justify-content: space-between; font-size: 12px; margin-bottom: 6px; gap: 8px;">
+                            <span id="sysCheckRepairProgressLabel" style="color: #eee;">⬇️ Lade fehlende Komponenten von GitHub herunter…</span>
+                            <span id="sysCheckRepairProgressPercent" style="color: var(--accent); font-weight: 700;">0%</span>
+                        </div>
+                        <div style="width: 100%; height: 8px; background: rgba(255,255,255,0.1); border-radius: 4px; overflow: hidden;">
+                            <div id="sysCheckRepairProgressBar" style="width: 0%; height: 100%; background: var(--accent); transition: width 0.18s ease;"></div>
                         </div>
                     </div>
 
