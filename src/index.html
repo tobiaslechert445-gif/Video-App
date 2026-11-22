@@ -1172,7 +1172,7 @@ My View
 
     <div id="importDropZone" onclick="openMediaImporter()" style="border: 2px dashed rgba(255,255,255,0.18); border-radius: 10px; padding: 14px; text-align: center; cursor: pointer; background: rgba(255,255,255,0.02); transition: 0.2s; margin-bottom: 8px;">
         <div style="font-size: 13px; color: #ddd; font-weight: 600;">Videos, Musik oder ganze Ordner hierher ziehen &amp; ablegen</div>
-        <div style="font-size: 11px; color: var(--text-muted); margin-top: 3px;">Unterstützt MP4, MKV, WEBM, AVI, MOV, M4V, MP3, FLAC, WAV, OGG u.v.m.</div>
+        <div style="font-size: 11px; color: var(--text-muted); margin-top: 3px;">Unterstützt MP4, MKV, WEBM, AVI, MOV, M4V, TS, M2TS, MP3, FLAC, DTS, WAV, OGG u.v.m.</div>
     </div>
 
     <div id="mediaImportProgressBox" class="hidden" style="background: rgba(29, 185, 84, 0.08); border: 1px solid rgba(29, 185, 84, 0.35); border-radius: 8px; padding: 10px 12px; margin-bottom: 8px;">
@@ -1186,7 +1186,7 @@ My View
     </div>
 </div>
 
-<input type="file" id="fileImporter" multiple accept=".mp4,.mkv,.webm,.avi,.mov,.m4v,.wmv,.flv,.ogv,.gif,.mp3,.wav,.flac,.ogg,.m4a,.aac,.wma" style="display: none;" onchange="handleMediaImport(event)">
+<input type="file" id="fileImporter" multiple accept=".mp4,.mkv,.webm,.avi,.mov,.m4v,.wmv,.flv,.ogv,.ts,.m2ts,.gif,.mp3,.wav,.flac,.ogg,.m4a,.aac,.wma,.dts,.dtshd,.ac3,.eac3" style="display: none;" onchange="handleMediaImport(event)">
         <div id="convertModalBody" class="convert-modal-body">
             <p>Keine Umwandlungen aktiv.</p>
         </div>
@@ -2298,7 +2298,7 @@ My View
     </div>
   </div>
 </div>
-<input type="file" id="nativeImporter" multiple accept=".mp3,.mp4,.mkv,.webm,.gif" style="display: none;">
+<input type="file" id="nativeImporter" multiple accept=".mp3,.mp4,.mkv,.webm,.avi,.mov,.m4v,.ts,.m2ts,.gif,.flac,.wav,.ogg,.m4a,.aac,.wma,.dts,.dtshd,.ac3,.eac3" style="display: none;">
 
 <div id="logoEditorModal" class="modal hidden CSP-CSP" style="display: none !important;">
   <div class="logo-modal-content" style="background: #181818; border: 1px solid #333;">

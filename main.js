@@ -138,8 +138,8 @@ function startStreamBridgeServer() {
 function getFilePathFromArgs(args) {
   if (!args || args.length < 2) return null
   
-  const videoExtensions = ['.mp4', '.m4v', '.webm', '.ogv', '.mkv', '.avi', '.mov', '.wmv', '.flv']
-  const audioExtensions = ['.mp3', '.wav', '.ogg', '.aac', '.flac', '.m4a', '.wma']
+  const videoExtensions = ['.mp4', '.m4v', '.webm', '.ogv', '.mkv', '.avi', '.mov', '.wmv', '.flv', '.ts', '.m2ts']
+  const audioExtensions = ['.mp3', '.wav', '.ogg', '.aac', '.flac', '.m4a', '.wma', '.dts', '.dtshd', '.ac3', '.eac3']
   const allExtensions = [...videoExtensions, ...audioExtensions]
   
   let startIndex = 1
@@ -376,7 +376,7 @@ ipcMain.handle("pick-media-files", async (event) => {
     title: "Videos & Musik auswählen",
     properties: ["openFile", "multiSelections"],
     filters: [
-      { name: "Medien (Video & Audio)", extensions: ["mp4", "mkv", "webm", "avi", "mov", "m4v", "wmv", "flv", "ogv", "gif", "mp3", "wav", "flac", "ogg", "m4a", "aac", "wma"] },
+      { name: "Medien (Video & Audio)", extensions: ["mp4", "mkv", "webm", "avi", "mov", "m4v", "wmv", "flv", "ogv", "ts", "m2ts", "gif", "mp3", "wav", "flac", "ogg", "m4a", "aac", "wma", "dts", "dtshd", "ac3", "eac3"] },
       { name: "Alle Dateien", extensions: ["*"] }
     ]
   });

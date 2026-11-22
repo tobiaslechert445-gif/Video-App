@@ -1336,8 +1336,8 @@ function renderFolderCard(folderPath, type, idx, container) {
           
           const files = fs.readdirSync(folderPath);
           const extPattern = type === 'music' 
-            ? /\.(mp3|wav|ogg|flac|m4a|aac|wma)$/i 
-            : /\.(mp4|webm|mkv|avi|mov|flv|ogv)$/i;
+            ? /\.(mp3|wav|ogg|flac|m4a|aac|wma|dts|dtshd|ac3|eac3)$/i 
+            : /\.(mp4|webm|mkv|avi|mov|flv|ogv|m4v|ts|m2ts)$/i;
           const lowerFileSet = new Set(files.map(x => x.toLowerCase()));
             
           const mediaFiles = files.filter(f => {
@@ -1476,7 +1476,7 @@ function loadMusic() {
     // 1. App's music folder (Internal Library)
     const localFiles = fs.existsSync(musicFolder) ? fs.readdirSync(musicFolder) : [];
     const localPaths = localFiles
-      .filter(file => file.match(/\.(mp3|wav|ogg|flac|m4a|aac|wma)$/i))
+      .filter(file => file.match(/\.(mp3|wav|ogg|flac|m4a|aac|wma|dts|dtshd|ac3|eac3)$/i))
       .map(file => path.join(musicFolder, file));
 
     localPaths.forEach(filePath => {
@@ -1552,7 +1552,7 @@ function loadMusic() {
     
     // 3. Library files (linked individual files)
     const libraryFiles = JSON.parse(localStorage.getItem("libraryFiles") || "[]")
-      .filter(f => f.match(/\.(mp3|wav|ogg|flac|m4a|aac|wma)$/i) && fs.existsSync(f));
+      .filter(f => f.match(/\.(mp3|wav|ogg|flac|m4a|aac|wma|dts|dtshd|ac3|eac3)$/i) && fs.existsSync(f));
 
     if (libraryFolders.length === 0 && libraryFiles.length === 0) {
       const emptyText = document.createElement("div");
@@ -1875,7 +1875,7 @@ function runNextMkvConversion() {
         '-map_metadata', '0',
         '-c:v', 'copy',
         '-c:a', 'aac',
-        '-b:a', '256k',
+        '-b:a', '320k',
         '-ac', '2',
         '-movflags', '+faststart',
         '-y',
@@ -2072,7 +2072,7 @@ function loadVideos() {
     const localLowerSet = new Set(localFiles.map(x => x.toLowerCase()));
     const localPaths = localFiles
       .filter(file => {
-        if (!file.match(/\.(mp4|webm|mkv|avi|mov|flv|ogv)$/i) || file.startsWith("buffer_") || file.startsWith("temp_")) return false;
+        if (!file.match(/\.(mp4|webm|mkv|avi|mov|flv|ogv|m4v|ts|m2ts)$/i) || file.startsWith("buffer_") || file.startsWith("temp_")) return false;
         if (file.toLowerCase().endsWith(".mkv") && !file.includes("_FEHLER")) {
           const mp4Twin = file.slice(0, -4).toLowerCase() + ".mp4";
           if (localLowerSet.has(mp4Twin)) return false;
@@ -2151,7 +2151,7 @@ function loadVideos() {
     
     // 3. Library files
     const libraryFiles = JSON.parse(localStorage.getItem("libraryFiles") || "[]")
-      .filter(f => f.match(/\.(mp4|webm|mkv|avi|mov|flv|ogv)$/i) && fs.existsSync(f));
+      .filter(f => f.match(/\.(mp4|webm|mkv|avi|mov|flv|ogv|m4v|ts|m2ts)$/i) && fs.existsSync(f));
 
     if (libraryFolders.length === 0 && libraryFiles.length === 0) {
       const emptyText = document.createElement("div");
@@ -2345,8 +2345,8 @@ function renderLiked(){
   const likedItems = Object.keys(liked).filter(key => liked[key])
 
   const filtered = likedItems.filter(key => {
-    if(likedView === "music" && !key.match(/\.(mp3|wav|ogg|flac|m4a|aac|wma)$/i)) return false
-    if(likedView === "video" && !key.match(/\.(mp4|mkv|webm|avi|mov|flv|ogv)$/i)) return false
+    if(likedView === "music" && !key.match(/\.(mp3|wav|ogg|flac|m4a|aac|wma|dts|dtshd|ac3|eac3)$/i)) return false
+    if(likedView === "video" && !key.match(/\.(mp4|mkv|webm|avi|mov|flv|ogv|m4v|ts|m2ts)$/i)) return false
     return true
   })
 
@@ -2362,7 +2362,7 @@ function renderLiked(){
 
   filtered.forEach(key => {
     const realPath = fromMediaKey(key)
-    const isVideo = !!realPath.match(/\.(mp4|mkv|webm|avi|mov|flv|ogv)$/i)
+    const isVideo = !!realPath.match(/\.(mp4|mkv|webm|avi|mov|flv|ogv|m4v|ts|m2ts)$/i)
     const normKey = toMediaKey(realPath)
     const currentTag = mediaTags[normKey] || ""
     const displayTag = currentTag !== "" ? currentTag : (isVideo ? "Video" : "Musik")
@@ -3307,7 +3307,7 @@ function probeMediaDurationAsync(filePath) {
   if (!key || mediaDurationCache[key] !== undefined || pendingDurationProbes.has(key)) return;
 
   pendingDurationProbes.add(key);
-  const isAudio = /\.(mp3|wav|ogg|flac|m4a|aac|wma)$/i.test(realPath);
+  const isAudio = /\.(mp3|wav|ogg|flac|m4a|aac|wma|dts|dtshd|ac3|eac3)$/i.test(realPath);
 
   if (isAudio && typeof mm !== "undefined" && typeof mm.parseFile === "function") {
     mm.parseFile(realPath, { duration: true, skipCovers: true }).then(meta => {
@@ -3754,7 +3754,7 @@ function renderHistory() {
     history.forEach(entry => {
         const rawPath = entry.path;
         const realPath = fromMediaKey(rawPath);
-        const isVideo = realPath.match(/\.(mp4|mkv|webm)$/i);
+        const isVideo = realPath.match(/\.(mp4|mkv|webm|avi|mov|flv|ogv|m4v|ts|m2ts)$/i);
         let name = path.basename(realPath).replace(/\.[^/.]+$/, "");
 
         const card = document.createElement("div");
@@ -4189,7 +4189,7 @@ function renderMiniPlaylist() {
     container.innerHTML = "";
     
     currentPlaybackList.forEach((filePath, i) => {
-        const isVideo = filePath.match(/\.(mp4|mkv|webm)$/i);
+        const isVideo = filePath.match(/\.(mp4|mkv|webm|avi|mov|flv|ogv|m4v|ts|m2ts)$/i);
         const name = path.basename(filePath).replace(/\.[^/.]+$/, "");
         const isActive = (i === currentIndex);
         
@@ -4265,7 +4265,7 @@ window.playEntirePlaylist = function(plName, type) {
     currentIndex = 0;
 
     const firstPath = currentPlaybackList[0];
-    const isVideo = firstPath.match(/\.(mp4|mkv|webm)$/i);
+    const isVideo = firstPath.match(/\.(mp4|mkv|webm|avi|mov|flv|ogv|m4v|ts|m2ts)$/i);
 
     // Tab wechseln und Player starten
     if (isVideo) {
@@ -11641,8 +11641,8 @@ const ThumbnailPreloader = {
         }
         if (typeof AppLogger !== 'undefined') AppLogger.info("Preloader", "Starte permanenten Thumbnail-Preload für Mediathek & verknüpfte Ordner...");
         
-        const videoExts = ['.mp4', '.m4v', '.webm', '.ogv', '.mkv', '.avi', '.mov', '.wmv', '.flv'];
-        const audioExts = ['.mp3', '.wav', '.ogg', '.aac', '.flac', '.m4a', '.wma'];
+        const videoExts = ['.mp4', '.m4v', '.webm', '.ogv', '.mkv', '.avi', '.mov', '.wmv', '.flv', '.ts', '.m2ts'];
+        const audioExts = ['.mp3', '.wav', '.ogg', '.aac', '.flac', '.m4a', '.wma', '.dts', '.dtshd', '.ac3', '.eac3'];
         const tasksMap = new Map();
 
         // 1. Dateien aus aktuellem State
@@ -12322,7 +12322,7 @@ function showFileContextMenu(e, filePath, mediaType) {
 
   menu.querySelector("#ctx-play-now").onclick = () => {
     menu.classList.add("hidden");
-    const isVid = mediaType === "video" || filePath.match(/\.(mp4|mkv|webm)$/i);
+    const isVid = mediaType === "video" || filePath.match(/\.(mp4|mkv|webm|avi|mov|flv|ogv|m4v|ts|m2ts)$/i);
     if (isVid) playVideo(filePath);
     else playMusic(filePath);
   };
@@ -14471,8 +14471,8 @@ function saveToPlaylists() {
     renderPlaylists();
 }
 
-const IMPORT_VIDEO_EXTS = new Set(['.mp4', '.m4v', '.webm', '.ogv', '.mkv', '.avi', '.mov', '.wmv', '.flv', '.gif']);
-const IMPORT_AUDIO_EXTS = new Set(['.mp3', '.wav', '.flac', '.ogg', '.m4a', '.aac', '.wma']);
+const IMPORT_VIDEO_EXTS = new Set(['.mp4', '.m4v', '.webm', '.ogv', '.mkv', '.avi', '.mov', '.wmv', '.flv', '.ts', '.m2ts', '.gif']);
+const IMPORT_AUDIO_EXTS = new Set(['.mp3', '.wav', '.flac', '.ogg', '.m4a', '.aac', '.wma', '.dts', '.dtshd', '.ac3', '.eac3']);
 
 function getSelectedImportMode() {
     const sel = document.getElementById("importModeSelect");
@@ -14900,8 +14900,8 @@ let activeTmSubPlaylist = null;
 function getAllTmMediaFiles(category) {
     const isMusic = category === 'music';
     const extPattern = isMusic
-        ? /\.(mp3|wav|ogg|flac|m4a|aac|wma)$/i
-        : /\.(mp4|webm|mkv|avi|mov|flv|ogv)$/i;
+        ? /\.(mp3|wav|ogg|flac|m4a|aac|wma|dts|dtshd|ac3|eac3)$/i
+        : /\.(mp4|webm|mkv|avi|mov|flv|ogv|m4v|ts|m2ts)$/i;
     const seenKeys = new Set();
     const results = [];
 
@@ -15245,8 +15245,8 @@ function playMediaFile(filePath) {
   if (!filePath || !fs.existsSync(filePath)) return;
   
   const ext = path.extname(filePath).toLowerCase();
-  const videoExtensions = ['.mp4', '.m4v', '.webm', '.ogv', '.mkv', '.avi', '.mov', '.wmv', '.flv'];
-  const audioExtensions = ['.mp3', '.wav', '.ogg', '.aac', '.flac', '.m4a', '.wma'];
+  const videoExtensions = ['.mp4', '.m4v', '.webm', '.ogv', '.mkv', '.avi', '.mov', '.wmv', '.flv', '.ts', '.m2ts'];
+  const audioExtensions = ['.mp3', '.wav', '.ogg', '.aac', '.flac', '.m4a', '.wma', '.dts', '.dtshd', '.ac3', '.eac3'];
   
   const isVideo = videoExtensions.includes(ext);
   const isAudio = audioExtensions.includes(ext);
@@ -15378,8 +15378,8 @@ const IGNORED_FOLDERS = new Set([
   'build'
 ]);
 
-const AUDIO_EXTS = new Set(['.mp3', '.wav', '.ogg', '.flac', '.m4a', '.aac', '.wma']);
-const VIDEO_EXTS = new Set(['.mp4', '.webm', '.mkv', '.avi', '.mov', '.flv', '.ogv']);
+const AUDIO_EXTS = new Set(['.mp3', '.wav', '.ogg', '.flac', '.m4a', '.aac', '.wma', '.dts', '.dtshd', '.ac3', '.eac3']);
+const VIDEO_EXTS = new Set(['.mp4', '.webm', '.mkv', '.avi', '.mov', '.flv', '.ogv', '.m4v', '.ts', '.m2ts']);
 const IMAGE_EXTS = new Set(['.png', '.jpg', '.jpeg', '.webp', '.gif', '.bmp', '.svg']);
 
 function detectDrives() {
@@ -16789,7 +16789,7 @@ function loadVideoTrackPrefsMap() {
 function getMediaStemPrefKey(rawPath) {
   if (!rawPath || typeof rawPath !== "string") return "";
   const norm = rawPath.replace(/\//g, "\\").trim().toLowerCase();
-  return norm.replace(/\.(mkv|mp4|m4v|webm|avi|mov|flv|ogv)$/i, "");
+  return norm.replace(/\.(mkv|mp4|m4v|webm|avi|mov|flv|ogv|ts|m2ts|dts|dtshd|ac3|eac3)$/i, "");
 }
 
 function getSavedTrackPrefs(rawPath) {
@@ -16893,7 +16893,9 @@ function formatTrackTitle(track, fallbackPrefix) {
 function formatTrackSubtext(track) {
   const tags = [];
   if (track.lang && track.lang !== "und") tags.push(track.lang.toUpperCase());
-  if (track.codec) tags.push(track.codec.toUpperCase());
+  const codecTag = track.codecDisplay || (track.codec ? track.codec.toUpperCase() : "");
+  if (codecTag) tags.push(codecTag);
+  if (track.channels) tags.push(track.channels);
   if (track.isDefault) tags.push("Standard");
   if (track.isForced) tags.push("Erzwungen");
   if (track.source === "saved") tags.push("Gesichert");
@@ -17704,7 +17706,7 @@ window.playNextInQueue = function(filePath) {
   if (!currentPlaybackList || currentPlaybackList.length === 0) {
     currentPlaybackList = [filePath];
     currentIndex = 0;
-    const isVid = filePath.match(/\.(mp4|mkv|webm)$/i);
+    const isVid = filePath.match(/\.(mp4|mkv|webm|avi|mov|flv|ogv|m4v|ts|m2ts)$/i);
     if (isVid) playVideo(filePath);
     else playMusic(filePath);
   } else {
@@ -17727,7 +17729,7 @@ window.addToQueueList = function(filePath) {
   if (!currentPlaybackList || currentPlaybackList.length === 0) {
     currentPlaybackList = [filePath];
     currentIndex = 0;
-    const isVid = filePath.match(/\.(mp4|mkv|webm)$/i);
+    const isVid = filePath.match(/\.(mp4|mkv|webm|avi|mov|flv|ogv|m4v|ts|m2ts)$/i);
     if (isVid) playVideo(filePath);
     else playMusic(filePath);
   } else {
@@ -17822,7 +17824,7 @@ window.renderQueueDrawer = function() {
     item.draggable = true;
     if (isPast) item.style.opacity = "0.5";
 
-    const isVid = fileKey.match(/\.(mp4|mkv|webm)$/i);
+    const isVid = fileKey.match(/\.(mp4|mkv|webm|avi|mov|flv|ogv|m4v|ts|m2ts)$/i);
     const icon = isVid ? '🎬' : '🎵';
 
     item.innerHTML = `

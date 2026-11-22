@@ -131,11 +131,15 @@ fn guess_mime(path: &Path) -> &'static str {
         "avi" => "video/x-msvideo",
         "mov" => "video/quicktime",
         "ogv" => "video/ogg",
+        "ts" | "m2ts" | "mts" => "video/mp2t",
         "mp3" => "audio/mpeg",
         "wav" => "audio/wav",
         "ogg" => "audio/ogg",
         "flac" => "audio/flac",
         "m4a" | "aac" => "audio/mp4",
+        "dts" | "dtshd" => "audio/vnd.dts",
+        "ac3" => "audio/ac3",
+        "eac3" => "audio/eac3",
         "wma" => "audio/x-ms-wma",
         "png" => "image/png",
         "jpg" | "jpeg" => "image/jpeg",
@@ -195,6 +199,7 @@ fn resolve_app_paths() -> (PathBuf, PathBuf, PathBuf, bool) {
 static MKV_REMUX_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 static AUDIO_EXTRACT_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 static SUB_EXTRACT_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+static PLAYABLE_PATH_CACHE: OnceLock<Mutex<HashMap<String, PathBuf>>> = OnceLock::new();
 
 fn fnv1a_64(data: &[u8]) -> u64 {
     let mut hash: u64 = 0xcbf29ce484222325;
@@ -341,13 +346,102 @@ fn extract_stream_codec(details: &str) -> String {
         .to_lowercase()
 }
 
+fn is_non_browser_audio_codec(codec: &str) -> bool {
+    matches!(
+        codec.trim().to_lowercase().as_str(),
+        "dts"
+            | "dca"
+            | "ac3"
+            | "eac3"
+            | "truehd"
+            | "mlp"
+            | "wmav1"
+            | "wmav2"
+            | "wmapro"
+            | "wmalossless"
+            | "pcm_bluray"
+            | "pcm_dvd"
+    )
+}
+
+fn extract_audio_codec_display(details: &str, codec: &str) -> String {
+    let c_lower = codec.trim().to_lowercase();
+    let d_lower = details.to_lowercase();
+    if c_lower == "dts" || c_lower == "dca" {
+        if d_lower.contains("dts:x") {
+            return "DTS:X".to_string();
+        }
+        if d_lower.contains("dts-hd ma") {
+            return "DTS-HD MA".to_string();
+        }
+        if d_lower.contains("dts-hd hra") {
+            return "DTS-HD HRA".to_string();
+        }
+        if d_lower.contains("dts-es") {
+            return "DTS-ES".to_string();
+        }
+        if d_lower.contains("dts 96/24") {
+            return "DTS 96/24".to_string();
+        }
+        return "DTS".to_string();
+    }
+    match c_lower.as_str() {
+        "truehd" => "TrueHD".to_string(),
+        "eac3" => "E-AC3".to_string(),
+        "ac3" => "AC3".to_string(),
+        "aac" => "AAC".to_string(),
+        "flac" => "FLAC".to_string(),
+        "opus" => "Opus".to_string(),
+        "mp3" => "MP3".to_string(),
+        _ => codec.to_uppercase(),
+    }
+}
+
+fn extract_audio_channels(details: &str) -> String {
+    for part in details.split(',').skip(1) {
+        let low = part.trim().to_lowercase();
+        if low.contains("7.1") {
+            return "7.1".to_string();
+        }
+        if low.contains("6.1") {
+            return "6.1".to_string();
+        }
+        if low.contains("5.1") {
+            return "5.1".to_string();
+        }
+        if low.starts_with("quad") {
+            return "4.0".to_string();
+        }
+        if low.contains("stereo") || low.starts_with("2 channels") {
+            return "Stereo".to_string();
+        }
+        if low.contains("mono") || low.starts_with("1 channels") {
+            return "Mono".to_string();
+        }
+        if low.contains("channels") {
+            return part.trim().to_string();
+        }
+    }
+    String::new()
+}
+
 struct ProbedTracks {
     audio: Vec<Value>,
     subtitles: Vec<Value>,
 }
 
 fn probe_media_tracks(media_path: &Path, media_dir: &Path) -> ProbedTracks {
-    let mut audio_entries: Vec<(usize, String, String, String, bool, bool)> = Vec::new();
+    struct RawAudioEntry {
+        index: usize,
+        lang: String,
+        codec: String,
+        codec_display: String,
+        channels: String,
+        title: String,
+        is_default: bool,
+        is_forced: bool,
+    }
+    let mut audio_entries: Vec<RawAudioEntry> = Vec::new();
     let mut sub_entries: Vec<(usize, String, String, String, bool, bool, bool)> = Vec::new();
 
     let Some(ffmpeg) = find_ffmpeg(media_dir) else {
@@ -386,10 +480,21 @@ fn probe_media_tracks(media_path: &Path, media_dir: &Path) -> ProbedTracks {
                 let details = trimmed[pos + ": Audio:".len()..].trim();
                 let lang = extract_stream_lang(header);
                 let codec = extract_stream_codec(details);
+                let codec_display = extract_audio_codec_display(details, &codec);
+                let channels = extract_audio_channels(details);
                 let lower = details.to_lowercase();
                 let is_default = lower.contains("(default)");
                 let is_forced = lower.contains("(forced)");
-                audio_entries.push((idx, lang, codec, String::new(), is_default, is_forced));
+                audio_entries.push(RawAudioEntry {
+                    index: idx,
+                    lang,
+                    codec,
+                    codec_display,
+                    channels,
+                    title: String::new(),
+                    is_default,
+                    is_forced,
+                });
                 current = ActiveStream::Audio(idx);
             } else if let Some(pos) = trimmed.find(": Subtitle:") {
                 let idx = sub_entries.len();
@@ -421,7 +526,7 @@ fn probe_media_tracks(media_path: &Path, media_dir: &Path) -> ProbedTracks {
                     match current {
                         ActiveStream::Audio(i) => {
                             if let Some(entry) = audio_entries.get_mut(i) {
-                                entry.3 = title_val;
+                                entry.title = title_val;
                             }
                         }
                         ActiveStream::Subtitle(i) => {
@@ -438,21 +543,23 @@ fn probe_media_tracks(media_path: &Path, media_dir: &Path) -> ProbedTracks {
 
     let audio = audio_entries
         .into_iter()
-        .map(|(idx, lang, codec, title, is_default, is_forced)| {
-            let disp = lang_display_name(&lang);
+        .map(|entry| {
+            let disp = lang_display_name(&entry.lang);
             let lang_name = if !disp.is_empty() {
                 disp.to_string()
             } else {
-                lang.to_uppercase()
+                entry.lang.to_uppercase()
             };
             json!({
-                "index": idx,
-                "lang": lang,
+                "index": entry.index,
+                "lang": entry.lang,
                 "langName": lang_name,
-                "codec": codec,
-                "title": title,
-                "isDefault": is_default,
-                "isForced": is_forced
+                "codec": entry.codec,
+                "codecDisplay": entry.codec_display,
+                "channels": entry.channels,
+                "title": entry.title,
+                "isDefault": entry.is_default,
+                "isForced": entry.is_forced
             })
         })
         .collect();
@@ -495,22 +602,87 @@ fn file_hash_key(path: &Path, extra: &str) -> u64 {
     fnv1a_64(key_input.as_bytes())
 }
 
+fn store_playable_path_cache(cache_key: &str, resolved: &Path) {
+    let cache = PLAYABLE_PATH_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Ok(mut map) = cache.lock() {
+        map.insert(cache_key.to_string(), resolved.to_path_buf());
+    }
+}
+
+fn run_ffmpeg_video_remux(ffmpeg: &Path, src: &Path, tmp_mp4: &Path, transcode_video: bool) -> bool {
+    let _ = fs::remove_file(tmp_mp4);
+    let src_str = src.to_string_lossy().to_string();
+    let out_str = tmp_mp4.to_string_lossy().to_string();
+
+    let mut args: Vec<&str> = vec![
+        "-nostdin",
+        "-err_detect",
+        "ignore_err",
+        "-fflags",
+        "+genpts",
+        "-i",
+        &src_str,
+        "-map",
+        "0:v:0",
+        "-map",
+        "0:a?",
+        "-map_metadata",
+        "0",
+    ];
+    if transcode_video {
+        args.extend([
+            "-c:v",
+            "libx264",
+            "-preset",
+            "veryfast",
+            "-crf",
+            "21",
+            "-pix_fmt",
+            "yuv420p",
+        ]);
+    } else {
+        args.extend(["-c:v", "copy"]);
+    }
+    args.extend([
+        "-c:a",
+        "aac",
+        "-b:a",
+        "320k",
+        "-ac",
+        "2",
+        "-movflags",
+        "+faststart",
+        "-y",
+        &out_str,
+    ]);
+
+    let mut cmd = Command::new(ffmpeg);
+    cmd.args(&args);
+    #[cfg(target_os = "windows")]
+    cmd.creation_flags(CREATE_NO_WINDOW);
+
+    cmd.output()
+        .map(|o| o.status.success() && fs::metadata(tmp_mp4).map(|m| m.len() > 1024).unwrap_or(false))
+        .unwrap_or(false)
+}
+
 fn resolve_playable_media_path(path: &Path) -> PathBuf {
-    let is_mkv = path
+    let ext = path
         .extension()
         .and_then(|e| e.to_str())
-        .map(|e| e.eq_ignore_ascii_case("mkv"))
-        .unwrap_or(false);
-    if !is_mkv {
+        .unwrap_or("")
+        .to_lowercase();
+
+    let is_standalone_transcode_audio =
+        matches!(ext.as_str(), "dts" | "dtshd" | "ac3" | "eac3" | "wma");
+    let is_always_remux_video =
+        matches!(ext.as_str(), "mkv" | "ts" | "m2ts" | "mts" | "avi" | "flv" | "wmv");
+    let is_probe_video = matches!(ext.as_str(), "mp4" | "m4v" | "mov" | "webm");
+
+    if !is_standalone_transcode_audio && !is_always_remux_video && !is_probe_video {
         return path.to_path_buf();
     }
 
-    let sibling_mp4 = path.with_extension("mp4");
-    if sibling_mp4.is_file() && fs::metadata(&sibling_mp4).map(|m| m.len() > 1024).unwrap_or(false) {
-        return sibling_mp4;
-    }
-
-    let (_app_dir, media_dir, _exe, _pkg) = resolve_app_paths();
     let meta = match fs::metadata(path) {
         Ok(m) => m,
         Err(_) => return path.to_path_buf(),
@@ -521,71 +693,170 @@ fn resolve_playable_media_path(path: &Path) -> PathBuf {
         .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0);
-    let key_input = format!(
-        "{}|{}|{}",
-        path.to_string_lossy().to_lowercase(),
-        meta.len(),
-        mtime_ms
-    );
-    let hash = fnv1a_64(key_input.as_bytes());
-    let cache_dir = media_dir.join(".mkv_cache");
-    let cache_mp4 = cache_dir.join(format!("{:016x}.mp4", hash));
+    let cache_key = format!("{}|{}|{}", normalize_path_key(path), meta.len(), mtime_ms);
 
-    if cache_mp4.is_file() && fs::metadata(&cache_mp4).map(|m| m.len() > 1024).unwrap_or(false) {
+    let mem_cache = PLAYABLE_PATH_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Ok(map) = mem_cache.lock() {
+        if let Some(cached) = map.get(&cache_key) {
+            if cached.is_file() {
+                return cached.clone();
+            }
+        }
+    }
+
+    let (_app_dir, media_dir, _exe, _pkg) = resolve_app_paths();
+
+    if ext == "mkv" {
+        let sibling_mp4 = path.with_extension("mp4");
+        if sibling_mp4.is_file()
+            && fs::metadata(&sibling_mp4)
+                .map(|m| m.len() > 1024)
+                .unwrap_or(false)
+        {
+            let sib_probed = probe_media_tracks(&sibling_mp4, &media_dir);
+            let sib_codec = sib_probed
+                .audio
+                .first()
+                .and_then(|t| t.get("codec"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            if !is_non_browser_audio_codec(sib_codec) {
+                store_playable_path_cache(&cache_key, &sibling_mp4);
+                return sibling_mp4;
+            }
+        }
+    }
+
+    let hash = fnv1a_64(cache_key.as_bytes());
+    let cache_dir = media_dir.join(".mkv_cache");
+
+    if is_standalone_transcode_audio {
+        let cache_m4a = cache_dir.join(format!("audio_standalone_{:016x}.m4a", hash));
+        if cache_m4a.is_file()
+            && fs::metadata(&cache_m4a)
+                .map(|m| m.len() > 128)
+                .unwrap_or(false)
+        {
+            store_playable_path_cache(&cache_key, &cache_m4a);
+            return cache_m4a;
+        }
+
+        let lock = AUDIO_EXTRACT_LOCK.get_or_init(|| Mutex::new(()));
+        let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
+
+        if cache_m4a.is_file()
+            && fs::metadata(&cache_m4a)
+                .map(|m| m.len() > 128)
+                .unwrap_or(false)
+        {
+            store_playable_path_cache(&cache_key, &cache_m4a);
+            return cache_m4a;
+        }
+
+        if let Some(ffmpeg) = find_ffmpeg(&media_dir) {
+            let _ = fs::create_dir_all(&cache_dir);
+            let tmp_m4a = cache_dir.join(format!("audio_standalone_{:016x}.tmp.m4a", hash));
+            let _ = fs::remove_file(&tmp_m4a);
+
+            let mut cmd = Command::new(&ffmpeg);
+            cmd.args([
+                "-nostdin",
+                "-err_detect",
+                "ignore_err",
+                "-fflags",
+                "+genpts",
+                "-i",
+                &path.to_string_lossy(),
+                "-vn",
+                "-sn",
+                "-dn",
+                "-c:a",
+                "aac",
+                "-b:a",
+                "320k",
+                "-ac",
+                "2",
+                "-movflags",
+                "+faststart",
+                "-y",
+                &tmp_m4a.to_string_lossy(),
+            ]);
+            #[cfg(target_os = "windows")]
+            cmd.creation_flags(CREATE_NO_WINDOW);
+
+            if let Ok(output) = cmd.output() {
+                if output.status.success()
+                    && fs::metadata(&tmp_m4a)
+                        .map(|m| m.len() > 128)
+                        .unwrap_or(false)
+                {
+                    if fs::rename(&tmp_m4a, &cache_m4a).is_ok() && cache_m4a.is_file() {
+                        store_playable_path_cache(&cache_key, &cache_m4a);
+                        return cache_m4a;
+                    }
+                }
+            }
+            let _ = fs::remove_file(&tmp_m4a);
+        }
+
+        return path.to_path_buf();
+    }
+
+    if is_probe_video {
+        let probed = probe_media_tracks(path, &media_dir);
+        let track0_codec = probed
+            .audio
+            .first()
+            .and_then(|t| t.get("codec"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        if !is_non_browser_audio_codec(track0_codec) {
+            store_playable_path_cache(&cache_key, path);
+            return path.to_path_buf();
+        }
+    }
+
+    let cache_mp4 = if is_probe_video {
+        cache_dir.join(format!("remux_{:016x}.mp4", hash))
+    } else {
+        cache_dir.join(format!("{:016x}.mp4", hash))
+    };
+
+    if cache_mp4.is_file()
+        && fs::metadata(&cache_mp4)
+            .map(|m| m.len() > 1024)
+            .unwrap_or(false)
+    {
+        store_playable_path_cache(&cache_key, &cache_mp4);
         return cache_mp4;
     }
 
     let lock = MKV_REMUX_LOCK.get_or_init(|| Mutex::new(()));
     let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
 
-    if cache_mp4.is_file() && fs::metadata(&cache_mp4).map(|m| m.len() > 1024).unwrap_or(false) {
+    if cache_mp4.is_file()
+        && fs::metadata(&cache_mp4)
+            .map(|m| m.len() > 1024)
+            .unwrap_or(false)
+    {
+        store_playable_path_cache(&cache_key, &cache_mp4);
         return cache_mp4;
     }
 
     if let Some(ffmpeg) = find_ffmpeg(&media_dir) {
         let _ = fs::create_dir_all(&cache_dir);
-        let tmp_mp4 = cache_dir.join(format!("{:016x}.tmp.mp4", hash));
-        let _ = fs::remove_file(&tmp_mp4);
+        let tmp_mp4 = if is_probe_video {
+            cache_dir.join(format!("remux_{:016x}.tmp.mp4", hash))
+        } else {
+            cache_dir.join(format!("{:016x}.tmp.mp4", hash))
+        };
 
-        let mut cmd = Command::new(&ffmpeg);
-        cmd.args([
-            "-nostdin",
-            "-err_detect",
-            "ignore_err",
-            "-fflags",
-            "+genpts",
-            "-i",
-            &path.to_string_lossy(),
-            "-map",
-            "0:v:0",
-            "-map",
-            "0:a?",
-            "-map_metadata",
-            "0",
-            "-c:v",
-            "copy",
-            "-c:a",
-            "aac",
-            "-b:a",
-            "256k",
-            "-ac",
-            "2",
-            "-movflags",
-            "+faststart",
-            "-y",
-            &tmp_mp4.to_string_lossy(),
-        ]);
-        #[cfg(target_os = "windows")]
-        cmd.creation_flags(CREATE_NO_WINDOW);
+        let ok = run_ffmpeg_video_remux(&ffmpeg, path, &tmp_mp4, false)
+            || run_ffmpeg_video_remux(&ffmpeg, path, &tmp_mp4, true);
 
-        if let Ok(output) = cmd.output() {
-            if output.status.success()
-                && fs::metadata(&tmp_mp4).map(|m| m.len() > 1024).unwrap_or(false)
-            {
-                if fs::rename(&tmp_mp4, &cache_mp4).is_ok() && cache_mp4.is_file() {
-                    return cache_mp4;
-                }
-            }
+        if ok && fs::rename(&tmp_mp4, &cache_mp4).is_ok() && cache_mp4.is_file() {
+            store_playable_path_cache(&cache_key, &cache_mp4);
+            return cache_mp4;
         }
         let _ = fs::remove_file(&tmp_mp4);
     }
@@ -792,7 +1063,7 @@ fn handle_media_audio_stream(req: Request, url: &str) {
         "-c:a",
         "aac",
         "-b:a",
-        "256k",
+        "320k",
         "-ac",
         "2",
         "-movflags",
@@ -1434,8 +1705,8 @@ fn handle_dialog_api(req: Request, body: Value) {
                 .add_filter(
                     "Medien (Video & Audio)",
                     &[
-                        "mp4", "mkv", "webm", "avi", "mov", "m4v", "wmv", "flv", "ogv", "gif",
-                        "mp3", "wav", "flac", "ogg", "m4a", "aac", "wma",
+                        "mp4", "mkv", "webm", "avi", "mov", "m4v", "wmv", "flv", "ogv", "ts", "m2ts", "gif",
+                        "mp3", "wav", "flac", "ogg", "m4a", "aac", "wma", "dts", "dtshd", "ac3", "eac3",
                     ],
                 )
                 .add_filter("Alle Dateien", &["*"])
