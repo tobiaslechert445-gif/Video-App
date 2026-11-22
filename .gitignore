@@ -6,17 +6,19 @@ package-lock.json
 dist/
 build/
 *.asar
+src-tauri/target/
+src-tauri/gen/
 
-# Media files & Cache
-media/music/*
-!media/music/.gitkeep
-media/video/*
-!media/video/.gitkeep
-media/covers/*
-!media/covers/.gitkeep
-media/thumbnails/*
-media/snapshots/*
-media/debug_log.txt
+# Media files & Cache (personal data)
+media/
+
+# Local starter package, shortcuts & scratch/test artifacts
+My_View_Starter_Template/
+My_View_Starter_Template.zip
+*.lnk
+test_out.txt
+check_nesting.js
+login_github.bat
 
 # Environment & Temp
 .env

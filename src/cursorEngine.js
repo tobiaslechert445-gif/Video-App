@@ -90,7 +90,7 @@ const CURSOR_SELECTORS = {
     nesw: `${sAttrDeep("nesw-resize")}, ${sAttrDeep("ne-resize")}, ${sAttrDeep("sw-resize")}`,
     grabbing: sAttrDeep("grabbing"),
     notAllowed: `:disabled, [disabled], :disabled *, ${sAttrDeep("not-allowed")}`,
-    none: sAttrDeep("none")
+    none: `#videoMainContainer:fullscreen.fs-idle, #videoMainContainer:fullscreen.fs-idle *, ${sAttrDeep("none")}`
 };
 
 // --------------------------------------------------------------------------

@@ -1,12 +1,14 @@
 {
   "name": "my-media-app",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "main": "main.js",
   "scripts": {
     "start": "electron .",
     "pack": "electron-builder --dir",
     "build:update": "electron-builder --dir && node -e \"require('fs').copyFileSync('dist/win-unpacked/resources/app.asar', 'dist/app.asar'); console.log('✅ Update-Datei fertig: dist/app.asar');\"",
-    "build:native": "cmd /c scripts\\build_native.bat"
+    "build:native": "cmd /c scripts\\build_native.bat",
+    "tauri:dev": "cargo run --manifest-path src-tauri/Cargo.toml",
+    "tauri:build": "cargo build --release --manifest-path src-tauri/Cargo.toml"
   },
   "dependencies": {
     "fluent-ffmpeg": "^2.1.3",

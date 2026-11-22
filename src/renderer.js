@@ -7,7 +7,7 @@ const { exec, spawn } = require("child_process");
 const http = require("http");
 const mm = require("music-metadata");
 const { ipcRenderer, shell } = require("electron");
-const isPackaged = __dirname.includes('app.asar');
+const isPackaged = __dirname.includes('app.asar') || Boolean(window.__tauriIsPackaged);
 const mediaBase = isPackaged 
   ? path.join(path.dirname(process.execPath), "media") 
   : path.join(__dirname, "..", "media");
@@ -26,6 +26,20 @@ if (!fs.existsSync(videoFolder)) fs.mkdirSync(videoFolder, { recursive: true });
 
 const ffmpegPath = path.join(videoFolder, "ffmpeg.exe");
 const crypto = require("crypto");
+
+// Sicherer Pfad-Resolver für File-Objekte (Electron 41+ webUtils & Tauri kompatibel)
+window.getNativeFilePath = function(file) {
+  if (!file) return "";
+  if (typeof file === "string") return file;
+  if (file.path && typeof file.path === "string") return file.path;
+  try {
+    const el = require("electron");
+    if (el && el.webUtils && typeof el.webUtils.getPathForFile === "function") {
+      return el.webUtils.getPathForFile(file) || "";
+    }
+  } catch (e) {}
+  return "";
+};
 
 // ============================================================
 // SYSTEM LOGGING & DIAGNOSTICS ENGINE (User Consent Controlled)
@@ -545,11 +559,11 @@ document.addEventListener("mouseout", (e) => {
 }, { passive: true });
 
 function toggleVideoFullscreen() {
+    const fsTarget = document.getElementById("videoMainContainer") || videoPlayer || document.documentElement;
     if (!document.fullscreenElement) {
-        if (fullscreenBtn && fullscreenBtn.style.display !== "none" && !fullscreenBtn.classList.contains("hidden")) {
-            fullscreenBtn.click();
-        } else if (videoPlayer && videoPlayer.requestFullscreen) {
-            videoPlayer.requestFullscreen().catch(() => {
+        if (videoPlayer) videoPlayer.controls = false;
+        if (fsTarget && fsTarget.requestFullscreen) {
+            fsTarget.requestFullscreen().catch(() => {
                 if (document.documentElement.requestFullscreen) document.documentElement.requestFullscreen();
             });
         } else if (document.documentElement.requestFullscreen) {
@@ -780,6 +794,9 @@ function onEditorKeyDown(e) {
           }
       });
       document.getElementById("searchFilterBtn")?.classList.remove("active");
+      if (!document.fullscreenElement && typeof window.closeEqualizerModal === "function") {
+          window.closeEqualizerModal();
+      }
       return; // Sofort abbrechen, damit nichts anderes passiert!
   }
 
@@ -1002,7 +1019,7 @@ if(menuBtn){
 
 document.addEventListener("click",(e)=>{
 
-if(!videoMenu.contains(e.target) && e.target !== menuBtn){
+if(!videoMenu.contains(e.target) && e.target !== menuBtn && !(e.target.closest && e.target.closest('#fsMenuBtn'))){
 
 videoMenu.classList.remove("show")
 
@@ -1068,8 +1085,17 @@ function showTab(tab){
 function getMediaTitle(src) {
     if (!src) return "";
     // Falls es ein Live-Stream ist
-    if (src.startsWith("http://localhost")) return "Live-Stream läuft...";
-    const file = decodeURIComponent(src.split("/").pop().split("\\").pop());
+    if (
+        src.startsWith("http://localhost") ||
+        src.includes("127.0.0.1:45678/twitch") ||
+        src.includes("127.0.0.1:45678/youtube") ||
+        src.includes("player.twitch.tv") ||
+        src.includes("youtube-nocookie.com")
+    ) {
+        return "Live-Stream läuft...";
+    }
+    const real = fromMediaKey(src);
+    const file = real.split("/").pop().split("\\").pop();
     return file.replace(/\.[^/.]+$/, "");
 }
 
@@ -1078,7 +1104,13 @@ function updateNowPlaying() {
     if (!src) return;
 
     // Wenn es ein Stream ist, haben wir den Namen bereits manuell gesetzt
-    if (src.startsWith("http://localhost")) return; 
+    if (
+        src.startsWith("http://localhost") ||
+        src.includes("127.0.0.1:45678/twitch") ||
+        src.includes("127.0.0.1:45678/youtube") ||
+        src.includes("player.twitch.tv") ||
+        src.includes("youtube-nocookie.com")
+    ) return;
 
     // Ansonsten normal aus dem Pfad lesen
     nowPlaying.textContent = getMediaTitle(src);
@@ -1089,21 +1121,31 @@ function updateNowPlaying() {
 // --- HILFSFUNKTIONEN FÜR PFADE (Sicher & Einzigartig) ---
 function toMediaKey(value) {
     if (!value) return "";
-    if (value.startsWith("file://")) return value;
+    if (String(value).includes("/media?path=")) value = fromMediaKey(value);
+    if (String(value).startsWith("file://")) return value;
     return pathToFileURL(value).href;
 }
 
 function fromMediaKey(value) {
     if (!value) return "";
+    let s = String(value);
+    if (s.includes("/media?path=")) {
+        try {
+            const u = new URL(s);
+            s = u.searchParams.get("path") || s;
+        } catch (e) {
+            const idx = s.indexOf("path=");
+            if (idx !== -1) s = s.slice(idx + 5).split("&")[0];
+        }
+    }
     try {
         // fileURLToPath aus Node.js kümmert sich automatisch um %20 und Leerzeichen!
-        if (value.startsWith("file://")) {
-            return fileURLToPath(value);
+        if (s.startsWith("file://")) {
+            return fileURLToPath(s);
         }
-        // Falls sich doch ein %20 eingeschlichen hat:
-        return decodeURIComponent(value);
+        return decodeURIComponent(s);
     } catch(e) {
-        return value;
+        return s;
     }
 }
 
@@ -1296,8 +1338,16 @@ function renderFolderCard(folderPath, type, idx, container) {
           const extPattern = type === 'music' 
             ? /\.(mp3|wav|ogg|flac|m4a|aac|wma)$/i 
             : /\.(mp4|webm|mkv|avi|mov|flv|ogv)$/i;
+          const lowerFileSet = new Set(files.map(x => x.toLowerCase()));
             
-          const mediaFiles = files.filter(f => f.match(extPattern));
+          const mediaFiles = files.filter(f => {
+            if (!f.match(extPattern)) return false;
+            if (type === 'video' && f.toLowerCase().endsWith('.mkv') && !f.includes('_FEHLER')) {
+              const mp4Name = f.slice(0, -4).toLowerCase() + '.mp4';
+              if (lowerFileSet.has(mp4Name)) return false;
+            }
+            return true;
+          });
           
           if (mediaFiles.length === 0) {
             contentsGrid.innerHTML = `<div style="grid-column: 1/-1; text-align: center; color: var(--text-muted); padding: 10px; font-size: 12px;">Keine Mediendateien in diesem Ordner gefunden.</div>`;
@@ -1567,8 +1617,34 @@ function cleanupOldBuffers(currentFile) {
 // HINTERGRUND-KONVERTER (MIT UI & BERECHNUNG)
 ////////////////////////////////////////////////////////////
 
+function getKeepOriginalMkv() {
+    return localStorage.getItem("keepOriginalMkv") !== "false";
+}
+
+function syncKeepOriginalMkvUI() {
+    const keep = getKeepOriginalMkv();
+    const chk = document.getElementById("keepOriginalMkvToggle");
+    const hint = document.getElementById("keepOriginalMkvHint");
+    if (chk) chk.checked = keep;
+    if (hint) {
+        hint.textContent = keep
+            ? "AN — Original-.mkv bleibt erhalten (MP4 wird zusätzlich erstellt)"
+            : "AUS — Original-.mkv wird nach erfolgreicher MP4-Umwandlung gelöscht (Papierkorb)";
+    }
+}
+
+window.toggleKeepOriginalMkv = function(checked) {
+    const keep = Boolean(checked);
+    localStorage.setItem("keepOriginalMkv", keep ? "true" : "false");
+    syncKeepOriginalMkvUI();
+    if (typeof showVideoToast === "function") {
+        showVideoToast(keep ? "💾 Original-MKV wird nach Konvertierung beibehalten" : "🗑️ Original-MKV wird nach Konvertierung gelöscht");
+    }
+};
+
 function toggleConvertModal() {
     document.getElementById("convertModal").classList.toggle("hidden");
+    syncKeepOriginalMkvUI();
     updateConvertUI();
 }
 
@@ -1632,7 +1708,7 @@ function updateConvertUI() {
             <ul>
         `;
         conversionQueue.forEach(f => {
-            html += `<li>⏳ ${f.replace(/\.mkv$/i, "")}</li>`;
+            html += `<li>⏳ ${path.basename(f).replace(/\.mkv$/i, "")}</li>`;
         });
         html += `</ul></div>`;
     } else {
@@ -1649,6 +1725,257 @@ function updateConvertUI() {
 // HINTERGRUND-KONVERTER (MIT SCHUTZSCHILD & FEHLER-RETTUNG)
 ////////////////////////////////////////////////////////////
 
+function resolveMkvTargetMp4Path(fullMkvPath) {
+    const siblingMp4 = fullMkvPath.replace(/\.mkv$/i, ".mp4");
+    if (fs.existsSync(siblingMp4)) {
+        try {
+            if (fs.statSync(siblingMp4).size > 1024) return siblingMp4;
+        } catch (e) {}
+    }
+    const fallbackMp4 = path.join(videoFolder, path.basename(fullMkvPath).replace(/\.mkv$/i, ".mp4"));
+    const parentDir = path.dirname(fullMkvPath);
+    if (parentDir.toLowerCase() === videoFolder.toLowerCase()) return siblingMp4;
+    try {
+        const probePath = path.join(parentDir, `.myview_wtest_${Date.now()}`);
+        fs.writeFileSync(probePath, "", "utf8");
+        fs.unlinkSync(probePath);
+        return siblingMp4;
+    } catch (e) {
+        if (!fs.existsSync(videoFolder)) {
+            try { fs.mkdirSync(videoFolder, { recursive: true }); } catch (e2) {}
+        }
+        return fallbackMp4;
+    }
+}
+
+function updateLibraryAfterMkvConversion(fullMkvPath, fullMp4Path) {
+    try {
+        let libraryFiles = JSON.parse(localStorage.getItem("libraryFiles") || "[]");
+        const mkvLower = fullMkvPath.toLowerCase();
+        const mp4Lower = fullMp4Path.toLowerCase();
+        const inVideoFolder = path.dirname(fullMp4Path).toLowerCase() === videoFolder.toLowerCase();
+        let changed = false;
+
+        if (libraryFiles.some(f => String(f).toLowerCase() === mkvLower)) {
+            libraryFiles = libraryFiles.filter(f => String(f).toLowerCase() !== mkvLower);
+            changed = true;
+            if (!inVideoFolder && !libraryFiles.some(f => String(f).toLowerCase() === mp4Lower)) {
+                libraryFiles.push(fullMp4Path);
+            }
+        }
+        if (changed) {
+            localStorage.setItem("libraryFiles", JSON.stringify(libraryFiles));
+        }
+    } catch (e) {}
+}
+
+function runNextMkvConversion() {
+    if (conversionQueue.length === 0) {
+        isConverting = false;
+        currentConvData = { file: "", fullPath: "", progress: 0, eta: "Berechne...", durationSec: 0 };
+        updateConvertUI();
+        if (activeType !== "music") {
+            loadVideos();
+        } else {
+            // Video-Mediathek-Liste still aktualisieren, ohne Musik abzubrechen
+            try {
+                const wasPlaying = player && !player.paused;
+                const prevTime = player ? player.currentTime : 0;
+                loadVideos();
+                if (wasPlaying && player) {
+                    player.currentTime = prevTime;
+                    player.play().catch(() => {});
+                }
+            } catch (e) {}
+        }
+        if (typeof showVideoToast === "function") {
+            showVideoToast("✅ MKV-Umwandlung abgeschlossen!");
+        }
+        return;
+    }
+
+    isConverting = true;
+    const rawItem = conversionQueue.shift();
+    const fullMkvPath = path.isAbsolute(rawItem) ? rawItem : path.join(videoFolder, rawItem);
+    const mkvBaseName = path.basename(fullMkvPath);
+    const fullMp4Path = resolveMkvTargetMp4Path(fullMkvPath);
+
+    currentConvData = {
+        file: mkvBaseName.replace(/\.mkv$/i, ""),
+        fullPath: fullMkvPath,
+        progress: 0,
+        eta: "Berechne...",
+        durationSec: 0
+    };
+    updateConvertUI();
+
+    if (!fs.existsSync(fullMkvPath)) {
+        runNextMkvConversion();
+        return;
+    }
+
+    if (fs.existsSync(fullMp4Path)) {
+        let validMp4 = false;
+        try {
+            validMp4 = fs.statSync(fullMp4Path).size > 1024;
+        } catch (e) {}
+        if (validMp4) {
+            updateLibraryAfterMkvConversion(fullMkvPath, fullMp4Path);
+            if (getKeepOriginalMkv()) {
+                runNextMkvConversion();
+            } else {
+                deleteMkvFile(fullMkvPath, runNextMkvConversion);
+            }
+            return;
+        }
+    }
+
+    if (!fs.existsSync(ffmpegPath)) {
+        console.error("ffmpeg.exe nicht gefunden unter:", ffmpegPath);
+        if (typeof showVideoToast === "function") {
+            showVideoToast("⚠️ ffmpeg.exe fehlt – MKV wird per Direkt-Stream wiedergegeben.");
+        }
+        runNextMkvConversion();
+        return;
+    }
+
+    const proc = spawn(ffmpegPath, [
+        '-nostdin',
+        '-err_detect', 'ignore_err', // 🛡️ Zwingt FFmpeg, Fehler zu ignorieren!
+        '-fflags', '+genpts',        // 🛡️ Repariert kaputte Zeitstempel während der Umwandlung
+        '-i', fullMkvPath,
+        '-map', '0:v:0',
+        '-map', '0:a:0?',
+        '-c:v', 'copy',
+        '-c:a', 'aac',
+        '-b:a', '256k',
+        '-ac', '2',
+        '-movflags', '+faststart',
+        '-y',
+        fullMp4Path
+    ]);
+
+    proc.stderr.on('data', (data) => {
+        const str = data.toString();
+
+        if (currentConvData.durationSec === 0) {
+            const durMatches = Array.from(str.matchAll(/Duration:\s*(\d{2}):(\d{2}):(\d{2}(?:\.\d+)?)/g));
+            const durMatch = durMatches.length ? durMatches[durMatches.length - 1] : null;
+            if (durMatch) {
+                currentConvData.durationSec = parseInt(durMatch[1], 10) * 3600 + parseInt(durMatch[2], 10) * 60 + parseFloat(durMatch[3]);
+            }
+        }
+
+        const timeMatches = Array.from(str.matchAll(/time=\s*(\d{2}):(\d{2}):(\d{2}(?:\.\d+)?)/g));
+        const timeMatch = timeMatches.length ? timeMatches[timeMatches.length - 1] : null;
+        const speedMatches = Array.from(str.matchAll(/speed=\s*([\d.]+)x/g));
+        const speedMatch = speedMatches.length ? speedMatches[speedMatches.length - 1] : null;
+
+        if (timeMatch && currentConvData.durationSec > 0) {
+            const curSec = parseInt(timeMatch[1], 10) * 3600 + parseInt(timeMatch[2], 10) * 60 + parseFloat(timeMatch[3]);
+            currentConvData.progress = Math.min((curSec / currentConvData.durationSec) * 100, 100);
+
+            if (speedMatch) {
+                const speed = parseFloat(speedMatch[1]);
+                if (speed > 0) {
+                    const remainingSec = (currentConvData.durationSec - curSec) / speed;
+                    currentConvData.eta = formatTime(remainingSec) + " Min.";
+                }
+            }
+
+            if (!proc.updateTimeout) {
+                proc.updateTimeout = setTimeout(() => {
+                    updateConvertUI();
+                    proc.updateTimeout = null;
+                }, 400);
+            }
+        }
+    });
+
+    proc.stdout.on('data', () => {});
+
+    proc.on('close', (code) => {
+        if (proc.updateTimeout) {
+            clearTimeout(proc.updateTimeout);
+            proc.updateTimeout = null;
+        }
+        let isFinished = currentConvData.progress >= 95;
+        if (!isFinished && code === 0 && fs.existsSync(fullMp4Path)) {
+            try {
+                if (fs.statSync(fullMp4Path).size > 1024) isFinished = true;
+            } catch (e) {}
+        }
+
+        if (code === 0 && fs.existsSync(fullMp4Path) && isFinished) {
+            currentConvData.progress = 100;
+            updateConvertUI();
+            updateLibraryAfterMkvConversion(fullMkvPath, fullMp4Path);
+            if (getKeepOriginalMkv()) {
+                runNextMkvConversion();
+            } else {
+                deleteMkvFile(fullMkvPath, runNextMkvConversion);
+            }
+        } else {
+            console.error(`Fehler! Umwandlung bei ${currentConvData.progress.toFixed(1)}% gestoppt.`);
+            if (fs.existsSync(fullMp4Path)) {
+                try { fs.unlinkSync(fullMp4Path); } catch (e) {}
+            }
+            if (fs.existsSync(fullMkvPath)) {
+                try {
+                    const errorPath = fullMkvPath.replace(/\.mkv$/i, "_FEHLER.mkv");
+                    fs.renameSync(fullMkvPath, errorPath);
+                } catch (e) {}
+            }
+            runNextMkvConversion();
+        }
+    });
+
+    proc.on('error', (err) => {
+        console.error("FFmpeg Prozess Fehler:", err);
+        runNextMkvConversion();
+    });
+}
+
+function enqueueMkvConversions(mkvPaths) {
+    if (!Array.isArray(mkvPaths) || mkvPaths.length === 0) return 0;
+    const existingLower = new Set(conversionQueue.map(p => String(p).toLowerCase()));
+    if (isConverting && currentConvData && currentConvData.fullPath) {
+        existingLower.add(String(currentConvData.fullPath).toLowerCase());
+    }
+
+    let added = 0;
+    const keepOriginal = getKeepOriginalMkv();
+    for (const rawPath of mkvPaths) {
+        if (!rawPath) continue;
+        const fullPath = path.isAbsolute(rawPath) ? rawPath : path.join(videoFolder, rawPath);
+        if (!fullPath.toLowerCase().endsWith(".mkv") || fullPath.includes("_FEHLER")) continue;
+        if (!fs.existsSync(fullPath)) continue;
+
+        const targetMp4 = fullPath.replace(/\.mkv$/i, ".mp4");
+        const fallbackMp4 = path.join(videoFolder, path.basename(fullPath).replace(/\.mkv$/i, ".mp4"));
+        const hasValidMp4 = [targetMp4, fallbackMp4].some(mp4 => {
+            try { return fs.existsSync(mp4) && fs.statSync(mp4).size > 1024; } catch (e) { return false; }
+        });
+        if (hasValidMp4 && keepOriginal) {
+            continue;
+        }
+
+        const key = fullPath.toLowerCase();
+        if (existingLower.has(key)) continue;
+        existingLower.add(key);
+        conversionQueue.push(fullPath);
+        added++;
+    }
+
+    if (added > 0 || isConverting) {
+        updateConvertUI();
+        if (!isConverting && conversionQueue.length > 0) {
+            runNextMkvConversion();
+        }
+    }
+    return added;
+}
+
 function processMKVsInBackground() {
     if (!fs.existsSync(videoFolder)) return;
     const files = fs.readdirSync(videoFolder);
@@ -1656,145 +1983,43 @@ function processMKVsInBackground() {
     // Müllabfuhr für alte Puffer
     files.forEach(f => {
         if (f.startsWith("buffer_") || f.startsWith("temp_")) {
-            try { fs.unlinkSync(path.join(videoFolder, f)); } catch(e) {}
+            try { fs.unlinkSync(path.join(videoFolder, f)); } catch (e) {}
         }
     });
 
-    // Warteschlange füllen (Dateien mit _FEHLER ignorieren wir, um Endlosschleifen zu vermeiden!)
-    conversionQueue = files.filter(f => f.toLowerCase().endsWith(".mkv") && !f.includes("_FEHLER"));
-    
-    if (conversionQueue.length === 0) {
-        isConverting = false;
+    const mkvFullPaths = files
+        .filter(f => f.toLowerCase().endsWith(".mkv") && !f.includes("_FEHLER"))
+        .map(f => path.join(videoFolder, f));
+
+    enqueueMkvConversions(mkvFullPaths);
+    if (!isConverting && conversionQueue.length === 0) {
         updateConvertUI();
-        return;
     }
-
-    isConverting = true;
-    updateConvertUI();
-
-    function processNext() {
-        if (conversionQueue.length === 0) {
-            isConverting = false;
-            updateConvertUI();
-            loadVideos(); // Liste aktualisieren!
-            return;
-        }
-
-        const mkvName = conversionQueue.shift();
-        currentConvData = { file: mkvName.replace(/\.mkv$/i, ""), progress: 0, eta: "Berechne...", durationSec: 0 };
-        updateConvertUI();
-
-        const fullMkvPath = path.join(videoFolder, mkvName);
-        const mp4Name = mkvName.replace(/\.mkv$/i, ".mp4");
-        const fullMp4Path = path.join(videoFolder, mp4Name);
-
-        if (fs.existsSync(fullMp4Path)) {
-            // Wenn die MP4 schon da ist -> MKV löschen
-            deleteMkvFile(fullMkvPath, processNext);
-            return;
-        }
-
-        const proc = spawn(ffmpegPath, [
-            '-nostdin',
-            '-err_detect', 'ignore_err', // 🛡️ Zwingt FFmpeg, Fehler (wie bei 14:51) zu ignorieren!
-            '-fflags', '+genpts',        // 🛡️ Repariert kaputte Zeitstempel während der Umwandlung
-            '-i', fullMkvPath,
-            '-c:v', 'copy',
-            '-c:a', 'aac',
-            '-b:a', '256k',
-            '-y', 
-            fullMp4Path
-        ]);
-
-        proc.stderr.on('data', (data) => {
-            const str = data.toString();
-            
-            if (currentConvData.durationSec === 0) {
-                const durMatch = str.match(/Duration: (\d{2}):(\d{2}):(\d{2}\.\d{2})/);
-                if (durMatch) {
-                    currentConvData.durationSec = parseInt(durMatch[1])*3600 + parseInt(durMatch[2])*60 + parseFloat(durMatch[3]);
-                }
-            }
-
-            const timeMatch = str.match(/time=\s*(\d{2}):(\d{2}):(\d{2}\.\d{2})/);
-            const speedMatch = str.match(/speed=\s*([\d.]+)x/);
-
-            if (timeMatch && currentConvData.durationSec > 0) {
-                const curSec = parseInt(timeMatch[1])*3600 + parseInt(timeMatch[2])*60 + parseFloat(timeMatch[3]);
-                currentConvData.progress = Math.min((curSec / currentConvData.durationSec) * 100, 100);
-
-                if (speedMatch) {
-                    const speed = parseFloat(speedMatch[1]);
-                    if (speed > 0) {
-                        const remainingSec = (currentConvData.durationSec - curSec) / speed;
-                        currentConvData.eta = formatTime(remainingSec) + " Min.";
-                    }
-                }
-                
-                if (!proc.updateTimeout) {
-                    proc.updateTimeout = setTimeout(() => {
-                        updateConvertUI();
-                        proc.updateTimeout = null;
-                    }, 500); 
-                }
-            }
-        });
-
-        proc.stdout.on('data', () => {});
-
-        proc.on('close', (code) => {
-            // SICHERHEITS-NETZ: Ist das Video wirklich fast komplett fertig? (Toleranz ab 95%)
-            const isFinished = currentConvData.progress >= 95;
-
-            if (code === 0 && fs.existsSync(fullMp4Path) && isFinished) {
-                // ✅ 100% Erfolgreich: Erst JETZT darf die MKV gelöscht werden!
-                currentConvData.progress = 100;
-                updateConvertUI();
-                deleteMkvFile(fullMkvPath, processNext);
-            } else {
-                // ❌ Abgebrochen (z.B. weil der Film-Stream komplett zerstört ist)
-                console.error(`Fehler! Umwandlung bei ${currentConvData.progress.toFixed(1)}% gestoppt.`);
-                
-                // 1. Die unvollständige MP4 löschen
-                if (fs.existsSync(fullMp4Path)) {
-                    try { fs.unlinkSync(fullMp4Path); } catch(e) {}
-                }
-                
-                // 2. DIE MKV RETTEN! Wir hängen "_FEHLER" an, damit du weißt, welche Datei kaputt ist.
-                // Dadurch probiert die App sie beim nächsten Neustart nicht nochmal sinnlos umzuwandeln.
-                if (fs.existsSync(fullMkvPath)) {
-                    try {
-                        const errorPath = fullMkvPath.replace(/\.mkv$/i, "_FEHLER.mkv");
-                        fs.renameSync(fullMkvPath, errorPath);
-                    } catch(e) {}
-                }
-
-                processNext();
-            }
-        });
-
-        proc.on('error', (err) => {
-            console.error("FFmpeg Prozess Fehler:", err);
-            processNext();
-        });
-    }
-
-    processNext();
 }
 
 // Hilfsfunktion: Versucht erst den Papierkorb, dann die Notfall-Löschung
 function deleteMkvFile(filePath, callback) {
-    shell.trashItem(filePath).then(() => {
-        callback();
-    }).catch((err) => {
-        console.warn("Papierkorb-Bug erkannt! Lösche Datei permanent:", err);
-        try { 
-            fs.unlinkSync(filePath); // Notfall-Löschung (Permanent)
-        } catch(e) {
+    const done = typeof callback === "function" ? callback : () => {};
+    if (shell && typeof shell.trashItem === "function") {
+        Promise.resolve(shell.trashItem(filePath)).then(() => {
+            done();
+        }).catch((err) => {
+            console.warn("Papierkorb-Fallback: Lösche Datei direkt:", err);
+            try {
+                if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
+            } catch (e) {
+                console.error("Konnte Datei gar nicht löschen:", e);
+            }
+            done();
+        });
+    } else {
+        try {
+            if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
+        } catch (e) {
             console.error("Konnte Datei gar nicht löschen:", e);
         }
-        callback();
-    });
+        done();
+    }
 }
 
 ////////////////////////////////////////////////////////////
@@ -1814,8 +2039,16 @@ function loadVideos() {
     
     // 1. App's video folder (Internal Mediathek)
     const localFiles = fs.existsSync(videoFolder) ? fs.readdirSync(videoFolder) : [];
+    const localLowerSet = new Set(localFiles.map(x => x.toLowerCase()));
     const localPaths = localFiles
-      .filter(file => file.match(/\.(mp4|webm|mkv|avi|mov|flv|ogv)$/i) && !file.startsWith("buffer_") && !file.startsWith("temp_"))
+      .filter(file => {
+        if (!file.match(/\.(mp4|webm|mkv|avi|mov|flv|ogv)$/i) || file.startsWith("buffer_") || file.startsWith("temp_")) return false;
+        if (file.toLowerCase().endsWith(".mkv") && !file.includes("_FEHLER")) {
+          const mp4Twin = file.slice(0, -4).toLowerCase() + ".mp4";
+          if (localLowerSet.has(mp4Twin)) return false;
+        }
+        return true;
+      })
       .map(file => path.join(videoFolder, file));
 
     localPaths.forEach(filePath => {
@@ -2222,19 +2455,193 @@ player.addEventListener("ended", () => {
 // FULLSCREEN
 ////////////////////////////////////////////////////////////
 
-fullscreenBtn.onclick=()=>{
+fullscreenBtn.onclick = () => {
+  toggleVideoFullscreen();
+};
 
-if(!document.fullscreenElement){
-
-videoPlayer.requestFullscreen()
-
-}else{
-
-document.exitFullscreen()
-
+function toggleFullscreenPlayPause() {
+  if (!videoPlayer) return;
+  if (videoPlayer.paused) {
+    if (player) player.pause();
+    if (typeof record !== "undefined" && record) record.classList.remove("spin");
+    if (typeof ensureAudioContext === "function") ensureAudioContext();
+    videoPlayer.play().catch(() => {});
+  } else {
+    videoPlayer.pause();
+  }
+  if (typeof syncRecordGlow === "function") syncRecordGlow();
+  if (typeof updateNowPlaying === "function") updateNowPlaying();
 }
+window.toggleFullscreenPlayPause = toggleFullscreenPlayPause;
 
-}
+(function initFullscreenHud() {
+  const container = document.getElementById("videoMainContainer");
+  const videoMenuEl = document.getElementById("videoMenu");
+  const origMenuWrapper = videoMenuEl ? videoMenuEl.parentElement : null;
+  const fsMenuWrapper = document.getElementById("fsMenuWrapper");
+  if (!container || !videoPlayer) return;
+
+  videoPlayer.controls = false;
+  let fsIdleTimer = null;
+
+  function wakeFullscreenHud() {
+    container.classList.remove("fs-idle");
+    if (fsIdleTimer) clearTimeout(fsIdleTimer);
+    if (document.fullscreenElement === container) {
+      fsIdleTimer = setTimeout(() => {
+        const menuOpen = videoMenuEl && videoMenuEl.classList.contains("show");
+        const eqModalEl = document.getElementById("equalizerModal");
+        const eqOpen = Boolean(eqModalEl && !eqModalEl.classList.contains("hidden"));
+        if (!videoPlayer.paused && !menuOpen && !eqOpen) {
+          container.classList.add("fs-idle");
+        }
+      }, 2500);
+    }
+  }
+  window.wakeFullscreenHud = wakeFullscreenHud;
+
+  function syncFullscreenHudState() {
+    const fsPlayIcon = document.getElementById("fsPlayIcon");
+    const fsTitle = document.getElementById("fsVideoTitle");
+    const fsTime = document.getElementById("fsTimeDisplay");
+    const fsProg = document.getElementById("fsProgressBar");
+    const fsVol = document.getElementById("fsVolumeSlider");
+    const fsLike = document.getElementById("fsLikeBtn");
+    const fsLoop = document.getElementById("fsAbLoopBtn");
+    const fsLoopBadge = document.getElementById("fsAbLoopBadge");
+    const fsAmb = document.getElementById("fsAmbientBtn");
+    const fsEqBtn = document.getElementById("fsEqBtn");
+
+    if (fsPlayIcon) {
+      fsPlayIcon.innerHTML = videoPlayer.paused
+        ? '<polygon points="6 4 20 12 6 20 6 4"></polygon>'
+        : '<rect x="6" y="4" width="4" height="16" rx="1"></rect><rect x="14" y="4" width="4" height="16" rx="1"></rect>';
+    }
+    if (fsTitle) {
+      const cleanTitle = videoPlayer && videoPlayer.src ? getMediaTitle(videoPlayer.src) : "";
+      fsTitle.innerText = cleanTitle || (typeof nowPlaying !== "undefined" && nowPlaying && nowPlaying.textContent) || "Video";
+    }
+    if (fsProg && fsTime) {
+      const cur = videoPlayer.currentTime || 0;
+      const dur = videoPlayer.duration && isFinite(videoPlayer.duration) ? videoPlayer.duration : 0;
+      const pct = dur > 0 ? (cur / dur) * 100 : 0;
+      fsProg.value = pct;
+      fsProg.style.setProperty("--fs-prog", pct + "%");
+      fsTime.innerText = `${formatTime(cur)} / ${formatTime(dur)}`;
+    }
+    const mainVol = document.getElementById("volumeSlider");
+    if (fsVol && mainVol) fsVol.value = mainVol.value;
+
+    if (fsLike) {
+      const likedNow = typeof likeBtn !== "undefined" && likeBtn && likeBtn.innerText === "❤";
+      fsLike.classList.toggle("active", likedNow);
+      const svg = fsLike.querySelector("svg");
+      if (svg) svg.setAttribute("fill", likedNow ? "currentColor" : "none");
+    }
+    if (fsLoop) {
+      const abBtn = document.getElementById("abLoopBtn");
+      const abBadge = document.getElementById("abLoopText");
+      const activeLoop = Boolean(abBtn && abBtn.classList.contains("active"));
+      fsLoop.classList.toggle("active", activeLoop);
+      if (fsLoopBadge && abBadge) {
+        fsLoopBadge.innerText = abBadge.innerText;
+        fsLoopBadge.classList.toggle("hidden", abBadge.classList.contains("hidden"));
+      }
+    }
+    if (fsAmb) {
+      const ambBtn = document.getElementById("ambientBtn");
+      fsAmb.classList.toggle("active", Boolean(ambBtn && ambBtn.classList.contains("active")));
+    }
+    if (fsEqBtn) {
+      const eqModalEl = document.getElementById("equalizerModal");
+      fsEqBtn.classList.toggle("active", Boolean(eqModalEl && !eqModalEl.classList.contains("hidden")));
+    }
+  }
+
+  document.addEventListener("fullscreenchange", () => {
+    videoPlayer.controls = false;
+    const eqModalEl = document.getElementById("equalizerModal");
+    if (document.fullscreenElement === container) {
+      if (videoMenuEl && fsMenuWrapper) {
+        fsMenuWrapper.appendChild(videoMenuEl);
+      }
+      if (eqModalEl) {
+        container.appendChild(eqModalEl);
+      }
+      if (typeof window.clampEqualizerModalPosition === "function") {
+        window.clampEqualizerModalPosition();
+      }
+      syncFullscreenHudState();
+      wakeFullscreenHud();
+    } else {
+      if (fsIdleTimer) clearTimeout(fsIdleTimer);
+      container.classList.remove("fs-idle");
+      if (videoMenuEl && origMenuWrapper) {
+        videoMenuEl.classList.remove("show");
+        origMenuWrapper.appendChild(videoMenuEl);
+      }
+      if (eqModalEl && eqModalEl.parentElement !== document.body) {
+        document.body.appendChild(eqModalEl);
+      }
+      if (typeof window.clampEqualizerModalPosition === "function") {
+        window.clampEqualizerModalPosition();
+      }
+    }
+  });
+
+  const fsMenuBtn = document.getElementById("fsMenuBtn");
+  if (fsMenuBtn && videoMenuEl) {
+    fsMenuBtn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      const menuMain = document.getElementById("menuMain");
+      const speedPanel = document.getElementById("speedPanel");
+      if (menuMain) menuMain.classList.remove("hidden");
+      if (speedPanel) speedPanel.classList.add("hidden");
+      videoMenuEl.classList.toggle("show");
+      wakeFullscreenHud();
+    });
+  }
+
+  const fsProg = document.getElementById("fsProgressBar");
+  if (fsProg) {
+    fsProg.addEventListener("input", () => {
+      fsProg.style.setProperty("--fs-prog", fsProg.value + "%");
+      if (videoPlayer.duration && isFinite(videoPlayer.duration)) {
+        videoPlayer.currentTime = (parseFloat(fsProg.value) / 100) * videoPlayer.duration;
+      }
+    });
+  }
+
+  const fsVol = document.getElementById("fsVolumeSlider");
+  if (fsVol) {
+    fsVol.addEventListener("input", () => {
+      const mainVol = document.getElementById("volumeSlider");
+      if (mainVol) {
+        mainVol.value = fsVol.value;
+        mainVol.dispatchEvent(new Event("input"));
+      } else {
+        videoPlayer.volume = Math.min(1, parseFloat(fsVol.value));
+      }
+    });
+  }
+
+  ["play", "pause", "timeupdate", "loadedmetadata", "volumechange"].forEach(ev => {
+    videoPlayer.addEventListener(ev, () => {
+      if (document.fullscreenElement === container) {
+        syncFullscreenHudState();
+        if (ev === "pause") container.classList.remove("fs-idle");
+      }
+    });
+  });
+
+  ["likeBtn", "abLoopBtn", "ambientBtn"].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.addEventListener("click", () => setTimeout(syncFullscreenHudState, 30));
+  });
+
+  container.addEventListener("mousemove", wakeFullscreenHud);
+  container.addEventListener("mousedown", wakeFullscreenHud);
+})();
 
 ////////////////////////////////////////////////////////////
 // VIDEO CLICK
@@ -4391,7 +4798,7 @@ document.getElementById("fontImporter").addEventListener("change", (event) => {
     if (!fs.existsSync(fontsFolder)) fs.mkdirSync(fontsFolder, { recursive: true });
 
     for (let i = 0; i < files.length; i++) {
-        let sourcePath = files[i].path;
+        let sourcePath = window.getNativeFilePath(files[i]);
         if (!sourcePath && webUtils) sourcePath = webUtils.getPathForFile(files[i]);
         if (!sourcePath) continue;
 
@@ -6157,6 +6564,9 @@ window.openLogoEditor = function(sourcePath) {
     layerCounter = 0;
     
     const img = new Image();
+    if (window.__tauriRuntime && sourcePath && !sourcePath.startsWith("data:")) {
+        img.crossOrigin = "anonymous";
+    }
     img.onload = () => {
         baseWidth = img.width;
         baseHeight = img.height;
@@ -9858,10 +10268,17 @@ window.closeLogoEditor = function() {
     window.popoutEditorWindow = null;
     popoutEditorWindow = null;
     window.isEditorPoppedOut = false;
+
+    const modal = document.getElementById("logoEditorModal");
+    if (modal) {
+        modal.classList.add("hidden");
+        modal.style.setProperty("display", "none", "important");
+    }
     
     if (window.hadSettingsOpen) {
         const settingsModal = document.getElementById("settingsModal");
         if (settingsModal) settingsModal.classList.remove("hidden");
+        window.hadSettingsOpen = false;
     }
 };
 
@@ -9873,6 +10290,10 @@ let isDockingInProgress = false;
 
 function bridgePopoutEnvironment(childWin) {
     if (!childWin || childWin.closed) return;
+
+    if (typeof window.__patchTauriDomWindow === "function") {
+        window.__patchTauriDomWindow(childWin);
+    }
 
     // 1. Alle Funktionen von window auf childWin spiegeln (aber native Fenster-Methoden des Popouts niemals überschreiben!)
     const skipProps = new Set([
@@ -10150,10 +10571,29 @@ window.openPopoutEditorWindow = function(sourcePath = null, initialImg = null) {
 
     popoutEditorWindow = window.open('', 'DrawingTabletWindow', 'width=1400,height=900');
     if (!popoutEditorWindow) {
-        alert("Konnte kein separates Fenster öffnen.");
         if (typeof AppLogger !== 'undefined') {
-            AppLogger.error("LogoEditor", "window.open fehlgeschlagen (popoutEditorWindow ist null)");
+            AppLogger.warn("LogoEditor", "window.open lieferte null - starte Zeichenstudio im Hauptfenster");
         }
+        window.isEditorPoppedOut = false;
+        window.popoutEditorWindow = null;
+        popoutEditorWindow = null;
+
+        modal.classList.remove("hidden");
+        modal.style.setProperty("display", "flex", "important");
+
+        if (typeof window.initSidebarResizers === "function") window.initSidebarResizers(document);
+        if (typeof window.initPanelResizers === "function") window.initPanelResizers(document);
+        if (typeof window.initPanelDragAndDrop === "function") window.initPanelDragAndDrop(document);
+        if (typeof window.initDraggableModal === "function") window.initDraggableModal(document);
+
+        bindColorWheelEvents(document, window);
+        updateColorWheelModeButtonUI();
+        setTimeout(drawCSPColorWheel, 60);
+
+        if (typeof window.restoreLayout === "function") {
+            window.restoreLayout(document);
+        }
+        setupPopoutCanvasAndLayers(initialImg, document);
         return;
     }
 
@@ -10162,8 +10602,47 @@ window.openPopoutEditorWindow = function(sourcePath = null, initialImg = null) {
 
     popoutEditorWindow.document.title = "My View - Zeichenstudio (Tablet & 2. Bildschirm)";
 
-    // Stylesheets, Fonts und Inline-Styles in das neue Fenster kopieren
-    Array.from(document.querySelectorAll('link[rel="stylesheet"], style')).forEach(node => {
+    if (typeof window.__patchTauriDomWindow === "function") {
+        window.__patchTauriDomWindow(popoutEditorWindow);
+    }
+
+    const baseEl = popoutEditorWindow.document.createElement("base");
+    baseEl.href = window.location.href;
+    popoutEditorWindow.document.head.appendChild(baseEl);
+
+    // Stylesheets synchron als Inline-<style> injizieren (umgeht about:blank Cross-Origin-Blockierung in WebView2)
+    let injectedMainCss = "";
+    try {
+        const cssFile = path.join(__dirname, "style.css");
+        if (fs.existsSync(cssFile)) {
+            injectedMainCss = fs.readFileSync(cssFile, "utf8");
+        }
+    } catch (e) {}
+
+    if (!injectedMainCss) {
+        try {
+            injectedMainCss = Array.from(document.styleSheets)
+                .map(sheet => {
+                    try {
+                        return Array.from(sheet.cssRules || []).map(r => r.cssText).join("\n");
+                    } catch (e) {
+                        return "";
+                    }
+                })
+                .filter(Boolean)
+                .join("\n");
+        } catch (e) {}
+    }
+
+    if (injectedMainCss) {
+        const mainStyleEl = popoutEditorWindow.document.createElement("style");
+        mainStyleEl.id = "injectedPopoutMainCss";
+        mainStyleEl.textContent = injectedMainCss;
+        popoutEditorWindow.document.head.appendChild(mainStyleEl);
+    }
+
+    // Dynamische Inline-Styles (Fonts, Theme, Cursor) synchron ins Popout kopieren
+    Array.from(document.querySelectorAll("style")).forEach(node => {
         try {
             popoutEditorWindow.document.head.appendChild(node.cloneNode(true));
         } catch (e) {}
@@ -10171,6 +10650,7 @@ window.openPopoutEditorWindow = function(sourcePath = null, initialImg = null) {
 
     // Theme & Body Styling
     popoutEditorWindow.document.documentElement.className = document.documentElement.className;
+    popoutEditorWindow.document.documentElement.style.cssText = document.documentElement.style.cssText;
     popoutEditorWindow.document.body.className = document.body.className;
     popoutEditorWindow.document.body.style.margin = "0";
     popoutEditorWindow.document.body.style.padding = "0";
@@ -10185,7 +10665,7 @@ window.openPopoutEditorWindow = function(sourcePath = null, initialImg = null) {
     // Dadurch stürzt Chromium niemals durch zerstörte V8-Kontexte beim Schließen ab!
     popoutEditorWindow.document.body.innerHTML = modalContent.outerHTML;
 
-    // Modals und Dialoge in das Popout-Fenster klonen
+    // Modals und Dialoge in das Popout-Fenster klonen (immer initial versteckt)
     const popoutModals = [
         "photocraftModal",
         "brushStudioModal",
@@ -10199,7 +10679,12 @@ window.openPopoutEditorWindow = function(sourcePath = null, initialImg = null) {
         if (!popoutEditorWindow.document.getElementById(modalId)) {
             const orig = document.getElementById(modalId);
             if (orig) {
-                popoutEditorWindow.document.body.appendChild(orig.cloneNode(true));
+                const cloned = orig.cloneNode(true);
+                cloned.classList.add("hidden");
+                if (modalId === "layerContextMenu" || modalId === "editorSaveOptionsModal") {
+                    cloned.style.display = "none";
+                }
+                popoutEditorWindow.document.body.appendChild(cloned);
             }
         }
     });
@@ -10236,6 +10721,11 @@ window.openPopoutEditorWindow = function(sourcePath = null, initialImg = null) {
         window.isEditorPoppedOut = false;
         window.popoutEditorWindow = null;
         popoutEditorWindow = null;
+        if (window.hadSettingsOpen) {
+            const sm = document.getElementById("settingsModal");
+            if (sm) sm.classList.remove("hidden");
+            window.hadSettingsOpen = false;
+        }
     };
 
     // Tablettfenster Skalierung / Resize Listener
@@ -10275,11 +10765,23 @@ window.openPopoutEditorWindow = function(sourcePath = null, initialImg = null) {
     }
 
     setupPopoutCanvasAndLayers(initialImg);
+
+    [80, 200].forEach(delay => {
+        setTimeout(() => {
+            if (!popoutEditorWindow || popoutEditorWindow.closed) return;
+            try {
+                updateLogoTransform();
+                renderMainCanvas();
+                drawCSPColorWheel();
+                if (typeof window.updateNavigatorUI === "function") window.updateNavigatorUI();
+            } catch (e) {}
+        }, delay);
+    });
 };
 
-function setupPopoutCanvasAndLayers(initialImg) {
-    if (!popoutEditorWindow || popoutEditorWindow.closed) return;
-    const pDoc = popoutEditorWindow.document;
+function setupPopoutCanvasAndLayers(initialImg, targetDoc = null) {
+    const pDoc = targetDoc || (popoutEditorWindow && !popoutEditorWindow.closed ? popoutEditorWindow.document : null);
+    if (!pDoc) return;
 
     const transWrapper = pDoc.getElementById("logoTransformWrapper");
     if (transWrapper) {
@@ -10589,14 +11091,27 @@ window.saveLogoEditor = function(overwrite = false) {
     });
 
     const base64Data = exportCanvas.toDataURL("image/png").replace(/^data:image\/png;base64,/, "");
+    if (!base64Data) {
+        if (typeof showEditorToast === "function") showEditorToast("❌ Konnte Grafik nicht exportieren (leere Leinwand).", true);
+        return;
+    }
     let isInLogoFolder = currentEditingLogo && currentEditingLogo.startsWith(logoFolder);
     let destPath = (overwrite && currentEditingLogo && isInLogoFolder) ? currentEditingLogo : path.join(logoFolder, `logo_${Date.now()}.png`);
 
     try {
+        if (!fs.existsSync(logoFolder)) fs.mkdirSync(logoFolder, { recursive: true });
         fs.writeFileSync(destPath, base64Data, 'base64');
-        setActiveLogo(destPath); 
-        closeLogoEditor();
-    } catch (err) { alert("Fehler: " + err.message); }
+        currentEditingLogo = destPath;
+        window.currentEditingLogo = destPath;
+        setActiveLogo(destPath);
+        if (typeof showEditorToast === "function") {
+            showEditorToast("✅ Grafik gespeichert und als App-Logo aktiviert!");
+        }
+    } catch (err) {
+        if (typeof showEditorToast === "function") {
+            showEditorToast("❌ Fehler beim Speichern: " + err.message, true);
+        }
+    }
 };
 
 window.scaleActiveLayer = function(val) {
@@ -10618,7 +11133,7 @@ window.importNewLogo = function() {
         const file = e.target.files[0];
         if (!file) return;
 
-        let sourcePath = file.path;
+        let sourcePath = window.getNativeFilePath(file);
         if (!sourcePath) { try { sourcePath = require('electron').webUtils.getPathForFile(file); } catch(err) {} }
 
         if (sourcePath) { window.openLogoEditor(sourcePath); } else { alert("Fehler: Konnte den Dateipfad nicht lesen."); }
@@ -10711,13 +11226,17 @@ function renderLogosGrid() {
 }
 
 function setActiveLogo(customPath) {
-    if (customPath === "") {
+    if (!customPath || !fs.existsSync(customPath)) {
         localStorage.removeItem("appCustomLogo");
         const defaultLogoAbsPath = path.join(__dirname, "..", "assets", "logo.png");
-        actualLogoImg.src = pathToFileURL(defaultLogoAbsPath).href;
+        if (actualLogoImg) {
+            actualLogoImg.src = pathToFileURL(defaultLogoAbsPath).href;
+        }
     } else {
         localStorage.setItem("appCustomLogo", customPath);
-        actualLogoImg.src = `${pathToFileURL(customPath).href}?t=${Date.now()}`;
+        if (actualLogoImg) {
+            actualLogoImg.src = `${pathToFileURL(customPath).href}?t=${Date.now()}`;
+        }
     }
     renderLogosGrid();
 }
@@ -11075,6 +11594,10 @@ const ThumbnailPreloader = {
         return false;
     },
     async preloadAllThumbnailsPermanently() {
+        if (ThumbnailPreloader.isRunning) {
+            ThumbnailPreloader._pendingRescan = true;
+            return;
+        }
         if (typeof AppLogger !== 'undefined') AppLogger.info("Preloader", "Starte permanenten Thumbnail-Preload für Mediathek & verknüpfte Ordner...");
         
         const videoExts = ['.mp4', '.m4v', '.webm', '.ogv', '.mkv', '.avi', '.mov', '.wmv', '.flv'];
@@ -11194,14 +11717,21 @@ const ThumbnailPreloader = {
                         success = await this.extractAudioCover(currentTask.path, targetThumb);
                     }
                     if (success && fs.existsSync(targetThumb)) {
-                        // Live-Update von im UI bereits gerenderten Karten
-                        const safeThumbUrl = pathToFileURL(targetThumb).href;
+                        // Live-Update von im UI bereits gerenderten Karten (inkl. sofortigem Austausch im Videos-Tab)
+                        const safeThumbUrl = `${pathToFileURL(targetThumb).href}?t=${Date.now()}`;
+                        const normTaskPath = currentTask.path.replace(/\//g, "\\").toLowerCase();
                         document.querySelectorAll(`.mediaCard[data-file-path]`).forEach(card => {
-                            if (card.dataset.filePath === currentTask.path) {
+                            const normCardPath = (card.dataset.filePath || "").replace(/\//g, "\\").toLowerCase();
+                            if (normCardPath === normTaskPath) {
                                 if (currentTask.type === 'video') {
-                                    const oldThumb = card.querySelector(".mediaThumb, .mediaThumbVideo");
-                                    if (oldThumb && !oldThumb.classList.contains("staticThumb")) {
-                                        oldThumb.outerHTML = `<img class="mediaThumb staticThumb" style="width: 100%; height: 100%; object-fit: cover; border-radius: 8px; margin-bottom: 10px; aspect-ratio: 16 / 9;" src="${safeThumbUrl}" loading="lazy">`;
+                                    const oldThumb = card.querySelector(".mediaThumb, .mediaThumbVideo, .videoPlaceholderThumb");
+                                    if (oldThumb) {
+                                        const newImg = document.createElement("img");
+                                        newImg.className = "mediaThumb staticThumb";
+                                        newImg.style.cssText = "width: 100%; height: 100%; object-fit: cover; border-radius: 8px; margin-bottom: 10px; aspect-ratio: 16 / 9;";
+                                        newImg.loading = "lazy";
+                                        newImg.src = safeThumbUrl;
+                                        oldThumb.replaceWith(newImg);
                                         setupMediaThumbListeners(card, toMediaKey(currentTask.path), currentTask.type);
                                     }
                                 } else {
@@ -11232,6 +11762,11 @@ const ThumbnailPreloader = {
         if (typeof window.BgTaskManager !== 'undefined') window.BgTaskManager.update();
 
         if (typeof AppLogger !== 'undefined') AppLogger.info("Preloader", `Preload fertig: ${completed} neue Thumbnails dauerhaft im Cache gesichert.`);
+
+        if (ThumbnailPreloader._pendingRescan) {
+            ThumbnailPreloader._pendingRescan = false;
+            setTimeout(() => ThumbnailPreloader.preloadAllThumbnailsPermanently().catch(() => {}), 50);
+        }
     }
 };
 
@@ -11361,7 +11896,7 @@ window.selectCustomThumbFromFile = function() {
         const file = e.target.files[0];
         if (!file) return;
         
-        let sourcePath = file.path;
+        let sourcePath = window.getNativeFilePath(file);
         if (!sourcePath) {
             try { sourcePath = require('electron').webUtils.getPathForFile(file); } catch(err) {}
         }
@@ -11864,6 +12399,7 @@ function initApp() {
     discoverSystemFolders();
     loadMusic();
     loadVideos();
+    syncKeepOriginalMkvUI();
     processMKVsInBackground(); 
     loadSavedTheme(); 
     initEqualizer();
@@ -12439,7 +12975,7 @@ function assetCreationChoose(mode) {
             const file = e.target.files[0];
             if (!file) return;
 
-            let sourcePath = file.path;
+            let sourcePath = window.getNativeFilePath(file);
             if (!sourcePath) { 
                 try { 
                     sourcePath = require('electron').webUtils.getPathForFile(file); 
@@ -12691,28 +13227,68 @@ window.closeEditorSaveOptions = function() {
     }
 };
 
+function showEditorToast(message, isError = false) {
+    try {
+        const docs = [];
+        const edDoc = typeof getActiveEditorDoc === "function" ? getActiveEditorDoc() : document;
+        if (edDoc && edDoc.body) docs.push(edDoc);
+        if (document.body && edDoc !== document) docs.push(document);
+
+        docs.forEach((targetDoc) => {
+            const existing = targetDoc.getElementById("editorSaveToast");
+            if (existing && existing.parentNode) existing.parentNode.removeChild(existing);
+            const toast = targetDoc.createElement("div");
+            toast.id = "editorSaveToast";
+            toast.className = "editor-save-toast" + (isError ? " error" : "");
+            toast.textContent = message;
+            targetDoc.body.appendChild(toast);
+            setTimeout(() => {
+                if (toast.parentNode) toast.parentNode.removeChild(toast);
+            }, 3200);
+        });
+    } catch (e) {}
+    if (typeof showVideoToast === "function") {
+        showVideoToast(message);
+    }
+}
+
 // Context-aware Perform Save Routing with Custom Asset Naming, Strict 48x48 Scaling, and Playlist Cover injection
 window.editorPerformSave = async function(target) {
     const exportCanvas = getMergedCroppedCanvas();
-    
+    if (!exportCanvas || exportCanvas.width <= 0 || exportCanvas.height <= 0) {
+        showEditorToast("❌ Konnte Grafik nicht exportieren (ungültige Leinwand).", true);
+        return;
+    }
+
     // Read and sanitize custom name input
     const edDoc = getActiveEditorDoc();
     const nameInput = edDoc.getElementById("editorAssetNameInput") || document.getElementById("editorAssetNameInput");
     let assetName = nameInput ? nameInput.value.trim() : "";
     assetName = assetName.replace(/[^a-zA-Z0-9_\-\s]/g, "").replace(/\s+/g, "_");
-    
+
     if (target === 'logo') {
         if (!fs.existsSync(logoFolder)) fs.mkdirSync(logoFolder, { recursive: true });
         const base64Data = exportCanvas.toDataURL("image/png").replace(/^data:image\/png;base64,/, "");
-        let isDataUrl = currentEditingLogo && currentEditingLogo.startsWith("data:");
-        let isInLogoFolder = currentEditingLogo && currentEditingLogo.startsWith(logoFolder);
-        
-        let destPath = (!isDataUrl && isInLogoFolder && currentEditingLogo) 
-            ? currentEditingLogo 
-            : path.join(logoFolder, `${assetName || 'logo'}_${Date.now()}.png`);
-        
+        if (!base64Data) {
+            showEditorToast("❌ Konnte Grafik nicht als PNG kodieren.", true);
+            return;
+        }
+        const isDataUrl = currentEditingLogo && currentEditingLogo.startsWith("data:");
+        const isInLogoFolder = currentEditingLogo && currentEditingLogo.toLowerCase().startsWith(logoFolder.toLowerCase());
+
+        const destPath = assetName
+            ? path.join(logoFolder, `${assetName}_${Date.now()}.png`)
+            : ((!isDataUrl && isInLogoFolder && currentEditingLogo)
+                ? currentEditingLogo
+                : path.join(logoFolder, `logo_${Date.now()}.png`));
+
         try {
             fs.writeFileSync(destPath, base64Data, 'base64');
+            if (!fs.existsSync(destPath) || fs.statSync(destPath).size === 0) {
+                throw new Error("Gespeicherte Logo-Datei ist leer.");
+            }
+            currentEditingLogo = destPath;
+            window.currentEditingLogo = destPath;
             if (typeof setActiveLogo === "function") {
                 setActiveLogo(destPath);
             }
@@ -12721,36 +13297,43 @@ window.editorPerformSave = async function(target) {
             }
             if (nameInput) nameInput.value = "";
             window.closeEditorSaveOptions();
-            closeLogoEditor();
-            alert("Grafik erfolgreich in deiner App-Galerie gespeichert und als App-Logo aktiviert!");
+            showEditorToast("✅ Grafik gespeichert und als App-Logo aktiviert!");
         } catch (err) {
-            alert("Fehler beim Speichern: " + err.message);
+            showEditorToast("❌ Fehler beim Speichern: " + err.message, true);
         }
     }
     else if (target === 'gallery') {
         if (!fs.existsSync(logoFolder)) fs.mkdirSync(logoFolder, { recursive: true });
         const base64Data = exportCanvas.toDataURL("image/png").replace(/^data:image\/png;base64,/, "");
+        if (!base64Data) {
+            showEditorToast("❌ Konnte Grafik nicht als PNG kodieren.", true);
+            return;
+        }
         const destPath = path.join(logoFolder, `${assetName || 'artwork'}_${Date.now()}.png`);
-        
+
         try {
             fs.writeFileSync(destPath, base64Data, 'base64');
+            if (!fs.existsSync(destPath) || fs.statSync(destPath).size === 0) {
+                throw new Error("Gespeicherte Bilddatei ist leer.");
+            }
+            currentEditingLogo = destPath;
+            window.currentEditingLogo = destPath;
             if (typeof renderLogosGrid === "function") {
                 renderLogosGrid();
             }
             if (nameInput) nameInput.value = "";
             window.closeEditorSaveOptions();
-            closeLogoEditor();
-            alert("Bild erfolgreich in deiner App-Galerie gespeichert und gelagert!");
+            showEditorToast("✅ Bild erfolgreich in deiner App-Galerie gespeichert!");
         } catch (err) {
-            alert("Fehler beim Lagern in der App: " + err.message);
+            showEditorToast("❌ Fehler beim Speichern in der Galerie: " + err.message, true);
         }
     }
     else if (target === 'mediaThumb') {
         if (!activeTmSelection) {
-            alert("Fehler: Kein Medium ausgewählt.");
+            showEditorToast("⚠️ Kein Medium ausgewählt.", true);
             return;
         }
-        
+
         const scaleCanvas = document.createElement("canvas");
         scaleCanvas.width = 512;
         scaleCanvas.height = 512;
@@ -12758,43 +13341,42 @@ window.editorPerformSave = async function(target) {
         sCtx.imageSmoothingEnabled = true;
         sCtx.imageSmoothingQuality = "high";
         sCtx.drawImage(exportCanvas, 0, 0, 512, 512);
-        
+
         const dataUrl = scaleCanvas.toDataURL("image/png");
         const base64Data = dataUrl.replace(/^data:image\/png;base64,/, "");
-        
+
         const key = activeTmSelection.key;
         const coversFolder = path.join(mediaBase, "covers");
         if (!fs.existsSync(coversFolder)) fs.mkdirSync(coversFolder, { recursive: true });
-        
+
         const destName = `thumb_${Date.now()}.png`;
         const destPath = path.join(coversFolder, destName);
-        
+
         try {
             fs.writeFileSync(destPath, base64Data, 'base64');
-            
+
             const prev = mediaCustomThumbnails[key];
             if (prev && fs.existsSync(prev)) {
-                try { fs.unlinkSync(prev); } catch(e) {}
+                try { fs.unlinkSync(prev); } catch (e) {}
             }
-            
+
             mediaCustomThumbnails[key] = destPath;
             localStorage.setItem("mediaCustomThumbnails", JSON.stringify(mediaCustomThumbnails));
-            
+
             if (nameInput) nameInput.value = "";
             window.closeEditorSaveOptions();
-            closeLogoEditor();
-            
+
             loadMusic();
             loadVideos();
             renderHistory();
             if (typeof renderPlaylists === "function") renderPlaylists();
             if (typeof loadTM === "function") loadTM(activeTmCategory);
-            
-            alert("Individuelles Media-Thumbnail erfolgreich erstellt und angewendet!");
+
+            showEditorToast("✅ Individuelles Media-Thumbnail gespeichert & angewendet!");
         } catch (err) {
-            alert("Fehler beim Speichern des Thumbnails: " + err.message);
+            showEditorToast("❌ Fehler beim Speichern des Thumbnails: " + err.message, true);
         }
-    } 
+    }
     else if (target === 'cursor') {
         if (!fs.existsSync(cursorFolder)) fs.mkdirSync(cursorFolder, { recursive: true });
         const scaleCanvas = document.createElement("canvas");
@@ -12804,13 +13386,13 @@ window.editorPerformSave = async function(target) {
         sCtx.imageSmoothingEnabled = true;
         sCtx.imageSmoothingQuality = "high";
         sCtx.drawImage(exportCanvas, 0, 0, 48, 48);
-        
+
         const dataUrl = scaleCanvas.toDataURL("image/png");
         const base64Data = dataUrl.replace(/^data:image\/png;base64,/, "");
-        
+
         const cursorName = assetName || "eigen_zeiger";
         const destPath = path.join(cursorFolder, `${cursorName}_${Date.now()}.png`);
-        
+
         try {
             fs.writeFileSync(destPath, base64Data, 'base64');
             selectCustomPhysicalCursor(destPath);
@@ -12819,54 +13401,52 @@ window.editorPerformSave = async function(target) {
             }
             if (nameInput) nameInput.value = "";
             window.closeEditorSaveOptions();
-            closeLogoEditor();
-            alert("Dein Mauszeiger wurde erfolgreich unter dem Namen '" + cursorName.replace(/_/g, " ") + "' gespeichert und angewendet!");
+            showEditorToast("✅ Mauszeiger '" + cursorName.replace(/_/g, " ") + "' gespeichert & angewendet!");
         } catch (err) {
-            alert("Fehler beim Speichern des Zeigers: " + err.message);
+            showEditorToast("❌ Fehler beim Speichern des Zeigers: " + err.message, true);
         }
-    } 
+    }
     else if (target === 'cover') {
         const scaleCanvas = document.createElement("canvas");
         scaleCanvas.width = 800;
         scaleCanvas.height = 800;
         const sCtx = scaleCanvas.getContext("2d");
-        
+
         sCtx.fillStyle = "#000000";
         sCtx.fillRect(0, 0, 800, 800);
-        
+
         sCtx.imageSmoothingEnabled = true;
         sCtx.imageSmoothingQuality = "high";
         sCtx.drawImage(exportCanvas, 0, 0, 800, 800);
-        
+
         const dataUrl = scaleCanvas.toDataURL("image/jpeg", 0.9);
         const base64Data = dataUrl.replace(/^data:image\/jpeg;base64,/, "");
-        
+
         const safeName = `pl_${coverChangePlaylist.type}_${coverChangePlaylist.plName.replace(/\s+/g, '_')}.jpg`;
         const destPath = path.join(coverFolder, safeName);
-        
+
         try {
             fs.writeFileSync(destPath, base64Data, 'base64');
-            
+
             let covers = JSON.parse(localStorage.getItem("playlistCovers") || "{}");
             covers[`${coverChangePlaylist.type}_${coverChangePlaylist.plName}`] = destPath;
             localStorage.setItem("playlistCovers", JSON.stringify(covers));
-            
+
             if (nameInput) nameInput.value = "";
             window.closeEditorSaveOptions();
-            closeLogoEditor();
-            
-            if (!document.getElementById("playlistsTab").classList.contains("hidden")) renderPlaylists();
-            if (!document.getElementById("tab-playlists").classList.contains("hidden")) loadSettingsPlaylists(coverChangePlaylist.type);
-            
-            alert("Playlist-Cover erfolgreich erstellt, abgespeichert und angewendet!");
+
+            if (!document.getElementById("playlistsTab")?.classList.contains("hidden")) renderPlaylists();
+            if (!document.getElementById("tab-playlists")?.classList.contains("hidden")) loadSettingsPlaylists(coverChangePlaylist.type);
+
+            showEditorToast("✅ Playlist-Cover gespeichert & angewendet!");
         } catch (err) {
-            alert("Fehler beim Speichern des Covers: " + err.message);
+            showEditorToast("❌ Fehler beim Speichern des Covers: " + err.message, true);
         }
     }
     else if (target === 'file') {
         const base64Data = exportCanvas.toDataURL("image/png").replace(/^data:image\/png;base64,/, "");
         const downloadName = assetName || "mein_werk";
-        
+
         let savedPath = null;
         try {
             const res = await ipcRenderer.invoke("show-save-dialog", {
@@ -12878,10 +13458,9 @@ window.editorPerformSave = async function(target) {
                 fs.writeFileSync(res.filePath, base64Data, 'base64');
                 savedPath = res.filePath;
             } else if (res && res.canceled) {
-                return; // User canceled save dialog
+                return;
             }
         } catch (e) {
-            // Fallback: save to user Pictures folder or media/artworks
             try {
                 const os = require("os");
                 const picturesDir = path.join(os.homedir(), "Pictures");
@@ -12892,13 +13471,12 @@ window.editorPerformSave = async function(target) {
                 savedPath = fallbackPath;
             } catch (err2) {}
         }
-        
+
         if (savedPath) {
             if (nameInput) nameInput.value = "";
             window.closeEditorSaveOptions();
-            alert(`Datei erfolgreich auf deiner Festplatte gespeichert:\n${savedPath}`);
+            showEditorToast(`✅ Datei gespeichert: ${path.basename(savedPath)}`);
         } else {
-            // Direct download link as ultimate safety fallback
             const dataUrl = exportCanvas.toDataURL("image/png");
             const a = document.createElement("a");
             a.href = dataUrl;
@@ -12908,7 +13486,7 @@ window.editorPerformSave = async function(target) {
             edDoc.body.removeChild(a);
             if (nameInput) nameInput.value = "";
             window.closeEditorSaveOptions();
-            alert(`Download als "${downloadName}.png" gestartet.`);
+            showEditorToast(`✅ Download als "${downloadName}.png" gestartet.`);
         }
     }
 };
@@ -13617,7 +14195,8 @@ function switchSettingsTab(tabName) {
     } else if (tabName === 'snapshots') {
         if (typeof window.loadSnapshotsGallery === 'function') window.loadSnapshotsGallery();
     } else if (tabName === 'equalizer') {
-        if (typeof window.openEqualizerModal === 'function') window.openEqualizerModal();
+        if (typeof window.closeEqualizerModal === 'function') window.closeEqualizerModal();
+        if (typeof window.syncEqualizerModalUI === 'function') window.syncEqualizerModalUI();
     } else if (tabName === 'logos') {
         renderLogosGrid();
     } else if (tabName === 'cursor') {
@@ -13851,39 +14430,251 @@ function saveToPlaylists() {
     renderPlaylists();
 }
 
-function openMediaImporter() {
-    const input = document.getElementById("fileImporter");
-    if (input) input.click();
+const IMPORT_VIDEO_EXTS = new Set(['.mp4', '.m4v', '.webm', '.ogv', '.mkv', '.avi', '.mov', '.wmv', '.flv', '.gif']);
+const IMPORT_AUDIO_EXTS = new Set(['.mp3', '.wav', '.flac', '.ogg', '.m4a', '.aac', '.wma']);
+
+function getSelectedImportMode() {
+    const sel = document.getElementById("importModeSelect");
+    return sel ? sel.value : "link";
 }
 
-function handleMediaImport(e) {
+function getUniqueDestPath(destFolder, fileName) {
+    const ext = path.extname(fileName);
+    const base = path.basename(fileName, ext);
+    let candidate = path.join(destFolder, fileName);
+    let counter = 1;
+    while (fs.existsSync(candidate)) {
+        candidate = path.join(destFolder, `${base}_${counter}${ext}`);
+        counter++;
+    }
+    return candidate;
+}
+
+function collectMediaPathsRecursive(dirPath, outFiles) {
+    try {
+        const entries = fs.readdirSync(dirPath, { withFileTypes: true });
+        for (const entry of entries) {
+            const full = path.join(dirPath, entry.name);
+            if (entry.isDirectory()) {
+                collectMediaPathsRecursive(full, outFiles);
+            } else {
+                const ext = path.extname(entry.name).toLowerCase();
+                if (IMPORT_VIDEO_EXTS.has(ext) || IMPORT_AUDIO_EXTS.has(ext)) {
+                    outFiles.push(full);
+                }
+            }
+        }
+    } catch (err) {
+        console.error("Fehler beim Scannen von Ordner " + dirPath + ":", err);
+    }
+}
+
+async function importFilePathsBatch(inputPaths, modeOverride = null) {
+    if (!inputPaths || inputPaths.length === 0) return { imported: 0, foldersLinked: 0 };
+    const mode = modeOverride || getSelectedImportMode();
+    const progBox = document.getElementById("mediaImportProgressBox");
+    const progText = document.getElementById("mediaImportProgressText");
+    const progPct = document.getElementById("mediaImportProgressPercent");
+    const progBar = document.getElementById("mediaImportProgressBar");
+
+    const fileQueue = [];
+    const folderQueue = [];
+
+    for (const rawPath of inputPaths) {
+        if (!rawPath || !fs.existsSync(rawPath)) continue;
+        try {
+            const st = fs.statSync(rawPath);
+            if (st.isDirectory()) {
+                folderQueue.push(rawPath);
+            } else {
+                const ext = path.extname(rawPath).toLowerCase();
+                if (IMPORT_VIDEO_EXTS.has(ext) || IMPORT_AUDIO_EXTS.has(ext)) {
+                    fileQueue.push(rawPath);
+                }
+            }
+        } catch (err) {}
+    }
+
+    let imported = 0;
+    let foldersLinked = 0;
+    const mkvToConvert = [];
+
+    if (mode === "link") {
+        let libraryFolders = JSON.parse(localStorage.getItem("libraryFolders") || "[]");
+        for (const folderPath of folderQueue) {
+            if (!libraryFolders.includes(folderPath)) {
+                libraryFolders.push(folderPath);
+                foldersLinked++;
+            }
+            const folderFiles = [];
+            collectMediaPathsRecursive(folderPath, folderFiles);
+            folderFiles.forEach(fp => {
+                if (fp.toLowerCase().endsWith(".mkv") && !fp.includes("_FEHLER")) {
+                    mkvToConvert.push(fp);
+                }
+            });
+        }
+        if (foldersLinked > 0) {
+            localStorage.setItem("libraryFolders", JSON.stringify(libraryFolders));
+        }
+
+        let libraryFiles = JSON.parse(localStorage.getItem("libraryFiles") || "[]");
+        for (const filePath of fileQueue) {
+            if (filePath.toLowerCase().endsWith(".mkv") && !filePath.includes("_FEHLER")) {
+                mkvToConvert.push(filePath);
+            }
+            if (!libraryFiles.includes(filePath)) {
+                libraryFiles.push(filePath);
+                imported++;
+            }
+        }
+        if (imported > 0) {
+            localStorage.setItem("libraryFiles", JSON.stringify(libraryFiles));
+        }
+    } else {
+        for (const folderPath of folderQueue) {
+            collectMediaPathsRecursive(folderPath, fileQueue);
+        }
+        if (fileQueue.length > 0) {
+            if (!fs.existsSync(musicFolder)) fs.mkdirSync(musicFolder, { recursive: true });
+            if (!fs.existsSync(videoFolder)) fs.mkdirSync(videoFolder, { recursive: true });
+            if (progBox) progBox.classList.remove("hidden");
+
+            for (let i = 0; i < fileQueue.length; i++) {
+                const filePath = fileQueue[i];
+                const ext = path.extname(filePath).toLowerCase();
+                const destFolder = IMPORT_AUDIO_EXTS.has(ext) ? musicFolder : videoFolder;
+                const destPath = getUniqueDestPath(destFolder, path.basename(filePath));
+                const pct = Math.round(((i) / fileQueue.length) * 100);
+                if (progText) progText.innerText = `Kopiere: ${path.basename(filePath)} (${i + 1}/${fileQueue.length})`;
+                if (progPct) progPct.innerText = `${pct}%`;
+                if (progBar) progBar.style.width = `${pct}%`;
+
+                await new Promise(r => setTimeout(r, 0));
+                try {
+                    if (fs.promises && typeof fs.promises.copyFile === "function") {
+                        await fs.promises.copyFile(filePath, destPath);
+                    } else {
+                        fs.copyFileSync(filePath, destPath);
+                    }
+                    if (destPath.toLowerCase().endsWith(".mkv") && !destPath.includes("_FEHLER")) {
+                        mkvToConvert.push(destPath);
+                    }
+                    imported++;
+                } catch (err) {
+                    console.error("Fehler beim Kopieren von " + filePath + ":", err);
+                }
+            }
+            if (progPct) progPct.innerText = "100%";
+            if (progBar) progBar.style.width = "100%";
+            if (progText) progText.innerText = `Fertig! ${imported} Datei(en) kopiert.`;
+            setTimeout(() => { if (progBox) progBox.classList.add("hidden"); }, 1800);
+        }
+    }
+
+    if (typeof loadMusic === "function") loadMusic();
+    if (typeof loadVideos === "function") loadVideos();
+    if (typeof ThumbnailPreloader !== "undefined") {
+        ThumbnailPreloader.preloadAllThumbnailsPermanently().catch(() => {});
+    }
+
+    let queuedMkv = 0;
+    if (mkvToConvert.length > 0 && typeof enqueueMkvConversions === "function") {
+        queuedMkv = enqueueMkvConversions(mkvToConvert);
+    }
+
+    const parts = [];
+    if (imported > 0) parts.push(`${imported} Datei(en)`);
+    if (foldersLinked > 0) parts.push(`${foldersLinked} Ordner`);
+    if (queuedMkv > 0 && typeof showVideoToast === "function") {
+        showVideoToast(`🎬 ${queuedMkv} MKV-Datei(en) werden in MP4 umgewandelt...`);
+    } else if (parts.length > 0 && typeof showVideoToast === "function") {
+        showVideoToast(`✅ ${parts.join(" & ")} erfolgreich ${mode === 'link' ? 'verknüpft' : 'importiert'}!`);
+    }
+    return { imported, foldersLinked, queuedMkv };
+}
+
+async function openMediaImporter() {
+    try {
+        if (typeof ipcRenderer !== "undefined" && ipcRenderer.invoke) {
+            const res = await ipcRenderer.invoke("pick-media-files");
+            if (res && !res.canceled && Array.isArray(res.filePaths) && res.filePaths.length > 0) {
+                await importFilePathsBatch(res.filePaths);
+                return;
+            }
+            if (res && res.canceled) return;
+        }
+    } catch (err) {
+        console.warn("Nativer Datei-Dialog Fallback:", err);
+    }
+    const input = document.getElementById("fileImporter");
+    if (input) {
+        input.value = "";
+        input.click();
+    }
+}
+
+async function openFolderImporter() {
+    try {
+        if (typeof ipcRenderer !== "undefined" && ipcRenderer.invoke) {
+            const res = await ipcRenderer.invoke("pick-media-folder");
+            if (res && !res.canceled && Array.isArray(res.folderPaths) && res.folderPaths.length > 0) {
+                await importFilePathsBatch(res.folderPaths);
+                return;
+            }
+        }
+    } catch (err) {
+        console.error("Fehler beim Ordner-Import:", err);
+    }
+}
+
+async function handleMediaImport(e) {
     const files = e.target.files;
     if (!files || files.length === 0) return;
-    
-    if (!fs.existsSync(musicFolder)) fs.mkdirSync(musicFolder, { recursive: true });
-    if (!fs.existsSync(videoFolder)) fs.mkdirSync(videoFolder, { recursive: true });
-    
-    let copiedCount = 0;
-    Array.from(files).forEach(file => {
-        const filePath = file.path;
-        if (!filePath) return;
-        
-        const ext = path.extname(filePath).toLowerCase();
-        const destFolder = ['.mp3', '.wav', '.flac', '.ogg'].includes(ext) ? musicFolder : videoFolder;
-        const destPath = path.join(destFolder, path.basename(filePath));
-        
-        try {
-            fs.copyFileSync(filePath, destPath);
-            copiedCount++;
-        } catch (err) {
-            console.error("Fehler beim Kopieren von " + filePath + ":", err);
+
+    const paths = Array.from(files).map(f => window.getNativeFilePath(f)).filter(Boolean);
+    if (paths.length === 0) {
+        if (typeof showVideoToast === "function") showVideoToast("⚠️ Dateipfade konnten nicht gelesen werden.");
+        return;
+    }
+    await importFilePathsBatch(paths);
+    if (e.target) e.target.value = "";
+}
+
+function setImportDropZoneHighlight(active) {
+    const dz = document.getElementById("importDropZone");
+    if (!dz) return;
+    dz.style.borderColor = active ? "var(--accent)" : "rgba(255,255,255,0.18)";
+    dz.style.background = active ? "rgba(29, 185, 84, 0.1)" : "rgba(255,255,255,0.02)";
+}
+
+// Drop-Zone innerhalb des Import-Modals aktivieren
+(function initImportModalDropZone() {
+    const dz = document.getElementById("importDropZone");
+    if (!dz) return;
+    dz.addEventListener("dragover", (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        setImportDropZoneHighlight(true);
+    });
+    dz.addEventListener("dragleave", (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        setImportDropZoneHighlight(false);
+    });
+    dz.addEventListener("drop", async (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        setImportDropZoneHighlight(false);
+        const droppedPaths = Array.from(e.dataTransfer?.files || [])
+            .map(f => window.getNativeFilePath(f))
+            .filter(Boolean);
+        if (droppedPaths.length > 0 && typeof handleDroppedNativePaths === "function") {
+            await handleDroppedNativePaths(droppedPaths, true);
         }
     });
-    
-    alert(copiedCount + " Datei(en) erfolgreich importiert!");
-    loadMusic();
-    loadVideos();
-}
+})();
+window.openFolderImporter = openFolderImporter;
 
 let activePmCategory = 'music';
 let activePmPlaylists = { Left: '', Right: '' };
@@ -14548,10 +15339,22 @@ const IGNORED_FOLDERS = new Set([
 
 const AUDIO_EXTS = new Set(['.mp3', '.wav', '.ogg', '.flac', '.m4a', '.aac', '.wma']);
 const VIDEO_EXTS = new Set(['.mp4', '.webm', '.mkv', '.avi', '.mov', '.flv', '.ogv']);
+const IMAGE_EXTS = new Set(['.png', '.jpg', '.jpeg', '.webp', '.gif', '.bmp', '.svg']);
 
 function detectDrives() {
   return new Promise((resolve) => {
     if (process.platform === 'win32') {
+      const found = [];
+      for (let code = 67; code <= 90; code++) { // C..Z
+        const letter = String.fromCharCode(code);
+        try {
+          if (fs.existsSync(`${letter}:\\`)) found.push(letter);
+        } catch (e) {}
+      }
+      if (found.length > 0) {
+        resolve(found);
+        return;
+      }
       exec("powershell -Command \"Get-PSDrive -PSProvider FileSystem | Select-Object -ExpandProperty Name\"", (err, stdout) => {
         if (err || !stdout) {
           resolve(['C']);
@@ -14627,6 +15430,9 @@ async function openMediaFinder() {
 
 function closeMediaFinder() {
   cancelMediaScan();
+  if (typeof mfDriveCache !== "undefined") mfDriveCache.clear();
+  foundMediaFiles = [];
+  checkedMfPaths.clear();
   const modal = document.getElementById("mediaFinderModal");
   if (modal) modal.classList.add("hidden");
 }
@@ -14769,68 +15575,80 @@ async function scanDirectory(dirPath, onFileFound, onStatusUpdate, depth = 0) {
       await scanDirectory(subPath, onFileFound, onStatusUpdate, depth + 1);
     } else if (file.isFile()) {
       const ext = path.extname(file.name).toLowerCase();
-      if (AUDIO_EXTS.has(ext) || VIDEO_EXTS.has(ext)) {
+      const wantVideos = !document.getElementById("mfFilterVideos") || document.getElementById("mfFilterVideos").checked;
+      const wantAudio = Boolean(document.getElementById("mfFilterAudio") && document.getElementById("mfFilterAudio").checked);
+      const wantImages = Boolean(document.getElementById("mfFilterImages") && document.getElementById("mfFilterImages").checked);
+
+      const isVid = wantVideos && VIDEO_EXTS.has(ext);
+      const isAud = wantAudio && AUDIO_EXTS.has(ext);
+      const isImg = wantImages && IMAGE_EXTS.has(ext);
+
+      if (isVid || isAud || isImg) {
         const filePath = path.join(dirPath, file.name);
         
         // File size filtering for games/system sound assets
         if (filterGames) {
           try {
-            const stat = fs.statSync(filePath);
-            const size = stat.size;
-            if (AUDIO_EXTS.has(ext) && size < 512000) continue; // Skip audio < 500KB
-            if (VIDEO_EXTS.has(ext) && size < 1048576) continue; // Skip video < 1MB
+            const size = typeof file.size === "number" ? file.size : fs.statSync(filePath).size;
+            if (isAud && size < 512000) continue; // Skip audio < 500KB
+            if (isVid && size < 1048576) continue; // Skip video < 1MB
+            if (isImg && size < 5120) continue; // Skip tiny system icons < 5KB
           } catch(e) {
             continue; // Skip if we can't read stats
           }
         }
         
+        const fType = isAud ? 'music' : (isImg ? 'image' : 'video');
         onFileFound({
           name: file.name,
           path: filePath,
           dir: dirPath,
-          type: AUDIO_EXTS.has(ext) ? 'music' : 'video'
+          type: fType
         });
       }
     }
   }
 }
 
-async function startMediaScan() {
+const mfDriveCache = new Map();
+let mfRenderLimit = 200;
+
+function getMfCacheKey(driveLetter) {
+  const v = !document.getElementById("mfFilterVideos") || document.getElementById("mfFilterVideos").checked ? "V" : "";
+  const a = document.getElementById("mfFilterAudio") && document.getElementById("mfFilterAudio").checked ? "A" : "";
+  const i = document.getElementById("mfFilterImages") && document.getElementById("mfFilterImages").checked ? "I" : "";
+  const g = document.getElementById("mfOptFilterGames") && document.getElementById("mfOptFilterGames").checked ? "G" : "";
+  return `${String(driveLetter).toUpperCase()}_${v}${a}${i}${g}`;
+}
+
+async function startMediaScan(forceRefresh = false) {
   if (isScanningActive) {
     cancelMediaScan();
     return;
   }
   
-  const appDrive = path.parse(mediaBase).root[0].toUpperCase();
   const selectedDrive = mfActiveDrive.toUpperCase();
+  const rootPath = mfActiveDrive.length === 1 ? `${mfActiveDrive}:\\` : mfActiveDrive;
+  const cacheKey = getMfCacheKey(selectedDrive);
+  mfRenderLimit = 200;
   
   updateDiskSpaceInfo(selectedDrive);
-  
-  if (mfMode !== 'link' && selectedDrive !== appDrive) {
-    document.getElementById("mfStatusText").innerText = `Fehler: Falsches Laufwerk`;
-    document.getElementById("mfDetailText").innerText = `Verschieben ist nur auf dem App-Laufwerk (${appDrive}:\\) möglich.`;
-    document.getElementById("mfResultsList").innerHTML = `
-      <div style="text-align: center; padding: 40px; color: #ff6b6b; display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100%;">
-        <span style="font-size: 3rem; display: block; margin-bottom: 15px;">⚠️</span>
-        <p style="font-size: 14px; font-weight: bold; margin-bottom: 10px;">Laufwerk-Konflikt</p>
-        <p style="font-size: 12px; line-height: 1.5; color: var(--text-muted); max-width: 450px;">
-          Das Verschieben von Dateien über verschiedene Festplatten hinweg (z.B. von ${selectedDrive}:\\ nach ${appDrive}:\\) 
-          ist deaktiviert, um zeitaufwendiges Kopieren und Speicherplatzveränderungen zu verhindern.
-          <br><br>
-          Bitte wähle das Laufwerk <strong>${appDrive}:\\</strong> aus oder nutze den Modus <strong>Lokal abrufen</strong>.
-        </p>
-      </div>
-    `;
-    document.getElementById("mfScanBtn").disabled = true;
-    document.getElementById("mfImportBtn").disabled = true;
+  document.getElementById("mfScanBtn").disabled = false;
+
+  // Wenn das Laufwerk bereits in dieser Session gescannt wurde, sofort ohne Neuladen anzeigen!
+  if (!forceRefresh && mfDriveCache.has(cacheKey)) {
+    foundMediaFiles = mfDriveCache.get(cacheKey);
+    const statusText = document.getElementById("mfStatusText");
+    if (statusText) statusText.innerText = "Zwischengespeichert (Sofort geladen)";
+    const detailText = document.getElementById("mfDetailText");
+    if (detailText) detailText.innerText = `${foundMediaFiles.length} Mediendateien auf ${rootPath} (aus Cache).`;
+    renderMediaFinderResults();
+    updateMfImportButtonCount();
     return;
-  } else {
-    document.getElementById("mfScanBtn").disabled = false;
   }
   
   isScanningActive = true;
   foundMediaFiles = [];
-  checkedMfPaths.clear();
   scannedDirectoriesCount = 0;
   updateMfImportButtonCount();
   
@@ -14852,14 +15670,18 @@ async function startMediaScan() {
     </div>
   `;
   
-  const rootPath = mfActiveDrive.length === 1 ? `${mfActiveDrive}:\\` : mfActiveDrive;
-  
+  let lastUiUpdate = 0;
+  let scanCompletedNormally = true;
   try {
     await scanDirectory(
       rootPath, 
       (fileObj) => {
         foundMediaFiles.push(fileObj);
-        document.getElementById("mfDetailText").innerText = `${foundMediaFiles.length} Mediendateien gefunden...`;
+        const now = Date.now();
+        if (now - lastUiUpdate > 150) {
+          lastUiUpdate = now;
+          document.getElementById("mfDetailText").innerText = `${foundMediaFiles.length} Mediendateien gefunden...`;
+        }
         
         if (mfMode === 'move_select' && mfSubMode === 'auto') {
           checkedMfPaths.add(fileObj.path);
@@ -14870,16 +15692,21 @@ async function startMediaScan() {
       }
     );
   } catch (err) {
+    scanCompletedNormally = false;
     console.error("Scan failed:", err);
   }
-  
+
+  const wasCancelled = !isScanningActive;
   isScanningActive = false;
   scanBtn.innerText = "Aktualisieren";
   scanBtn.style.background = "rgba(255, 255, 255, 0.08)";
   scanBtn.style.color = "#fff";
-  
-  statusText.innerText = "Suche abgeschlossen";
-  document.getElementById("mfDetailText").innerText = `${foundMediaFiles.length} Mediendateien auf ${rootPath} gefunden.`;
+
+  if (!wasCancelled && scanCompletedNormally) {
+    mfDriveCache.set(cacheKey, foundMediaFiles);
+    statusText.innerText = "Suche abgeschlossen";
+    document.getElementById("mfDetailText").innerText = `${foundMediaFiles.length} Mediendateien auf ${rootPath} gefunden.`;
+  }
   
   renderMediaFinderResults();
   updateMfImportButtonCount();
@@ -14898,6 +15725,12 @@ function cancelMediaScan() {
     if (statusText) statusText.innerText = "Suche abgebrochen";
   }
 }
+
+window.restartMediaFinderScan = function() {
+  mfRenderLimit = 200;
+  cancelMediaScan();
+  setTimeout(() => startMediaScan(false), 30);
+};
 
 function onMfSearchInput() {
   const input = document.getElementById("mfSearchInput");
@@ -15084,7 +15917,9 @@ function renderMediaFinderResults() {
     processedFiles.sort((a, b) => a.name.localeCompare(b.name));
     document.getElementById("mfCountText").innerText = `${processedFiles.length} Dateien gefunden`;
     
-    processedFiles.forEach(file => {
+    const limit = typeof mfRenderLimit === "number" ? mfRenderLimit : 200;
+    const visibleFiles = processedFiles.slice(0, limit);
+    visibleFiles.forEach(file => {
       const key = toMediaKey(file.path);
       const isChecked = checkedMfPaths.has(file.path);
       const isCheckedHtml = isChecked ? "checked" : "";
@@ -15095,16 +15930,20 @@ function renderMediaFinderResults() {
         </div>
       `;
       
-      const displayTag = file.type === 'music' ? 'Musik' : 'Video';
+      const displayTag = file.type === 'music' ? 'Musik' : (file.type === 'image' ? 'Bild' : 'Video');
       const card = document.createElement("div");
       card.className = `mediaCard ${file.type}`;
       card.style.position = "relative";
       card.style.minHeight = file.type === 'music' ? '90px' : 'auto';
       
+      const thumbPreviewHtml = file.type === 'image'
+        ? `<img class="mediaThumb staticThumb" src="${pathToFileURL(file.path).href}" loading="lazy" style="width: 100%; height: 100%; object-fit: cover; border-radius: 8px; margin-bottom: 10px; aspect-ratio: 16 / 9;">`
+        : getMediaThumbHtml(key, file.type);
+
       card.innerHTML = `
         ${checkboxHtml}
         <div class="mediaBadge" style="pointer-events: none;">${displayTag}</div>
-        ${getMediaThumbHtml(key, file.type)}
+        ${thumbPreviewHtml}
         <div class="mediaTitle" title="${file.name}">${file.name.replace(/\.[^/.]+$/, "")}</div>
       `;
       
@@ -15121,6 +15960,18 @@ function renderMediaFinderResults() {
       
       container.appendChild(card);
     });
+
+    if (processedFiles.length > limit) {
+      const moreBtn = document.createElement("button");
+      moreBtn.className = "pillBtn";
+      moreBtn.style.cssText = "grid-column: 1 / -1; margin: 12px auto; padding: 8px 20px; font-weight: bold;";
+      moreBtn.innerText = `Mehr anzeigen (${processedFiles.length - limit} weitere)`;
+      moreBtn.onclick = () => {
+        mfRenderLimit = limit + 200;
+        renderMediaFinderResults();
+      };
+      container.appendChild(moreBtn);
+    }
   } else {
     container.style.display = "flex";
     container.style.flexDirection = "column";
@@ -15249,6 +16100,8 @@ function renderMediaFinderResults() {
         let thumbHtml = "";
         if (file.type === "video") {
           thumbHtml = `<video class="mf-list-video-thumb" src="${toMediaKey(file.path)}" muted preload="metadata" style="width: 48px; height: 27px; object-fit: cover; border-radius: 4px; border: 1px solid rgba(255,255,255,0.1); margin-right: 4px; aspect-ratio: 16/9;"></video>`;
+        } else if (file.type === "image") {
+          thumbHtml = `<img src="${pathToFileURL(file.path).href}" loading="lazy" style="width: 48px; height: 27px; object-fit: cover; border-radius: 4px; border: 1px solid rgba(255,255,255,0.1); margin-right: 4px; aspect-ratio: 16/9;">`;
         } else {
           thumbHtml = `<span style="font-size: 14px; width: 48px; display: inline-flex; justify-content: center; flex-shrink: 0;">🎵</span>`;
         }
@@ -15286,61 +16139,74 @@ function renderMediaFinderResults() {
 function importSelectedMfFiles() {
   if (checkedMfPaths.size === 0) return;
   
-  const appDrive = path.parse(mediaBase).root[0].toUpperCase();
-  const selectedDrive = mfActiveDrive.toUpperCase();
-  
-  if (mfMode !== 'link' && selectedDrive !== appDrive) {
-    alert(`Fehler: Verschieben von Dateien ist nur auf dem App-Laufwerk (${appDrive}:\\) erlaubt.`);
-    return;
-  }
+  const appDrive = (path.parse(mediaBase).root[0] || "C").toUpperCase();
+  const selectedDrive = (mfActiveDrive || appDrive).toUpperCase();
+  const isCrossDrive = selectedDrive !== appDrive;
   
   let count = 0;
+  const mkvToConvert = [];
   
   if (mfMode === 'link') {
     let libraryFiles = JSON.parse(localStorage.getItem("libraryFiles") || "[]");
     checkedMfPaths.forEach(filePath => {
-      if (fs.existsSync(filePath) && !libraryFiles.includes(filePath)) {
-        libraryFiles.push(filePath);
-        count++;
+      if (fs.existsSync(filePath)) {
+        if (filePath.toLowerCase().endsWith(".mkv") && !filePath.includes("_FEHLER")) {
+          mkvToConvert.push(filePath);
+        }
+        if (!libraryFiles.includes(filePath)) {
+          libraryFiles.push(filePath);
+          count++;
+        }
       }
     });
     localStorage.setItem("libraryFiles", JSON.stringify(libraryFiles));
-    alert(`${count} Datei(en) erfolgreich verknüpft!`);
+    if (typeof showVideoToast === "function") showVideoToast(`✅ ${count} Datei(en) verknüpft!`);
   } else {
     if (!fs.existsSync(musicFolder)) fs.mkdirSync(musicFolder, { recursive: true });
     if (!fs.existsSync(videoFolder)) fs.mkdirSync(videoFolder, { recursive: true });
+    if (!fs.existsSync(logoFolder)) fs.mkdirSync(logoFolder, { recursive: true });
     
     checkedMfPaths.forEach(filePath => {
       if (!fs.existsSync(filePath)) return;
       
       const ext = path.extname(filePath).toLowerCase();
-      const type = AUDIO_EXTS.has(ext) ? 'music' : 'video';
-      const destFolder = type === 'music' ? musicFolder : videoFolder;
-      
-      let destPath = path.join(destFolder, path.basename(filePath));
-      if (fs.existsSync(destPath)) {
-        const baseName = path.basename(filePath, ext);
-        let counter = 1;
-        while (fs.existsSync(path.join(destFolder, `${baseName}_${counter}${ext}`))) {
-          counter++;
-        }
-        destPath = path.join(destFolder, `${baseName}_${counter}${ext}`);
-      }
+      const type = AUDIO_EXTS.has(ext) ? 'music' : (IMAGE_EXTS.has(ext) ? 'image' : 'video');
+      const destFolder = type === 'music' ? musicFolder : (type === 'image' ? logoFolder : videoFolder);
+      const destPath = getUniqueDestPath(destFolder, path.basename(filePath));
       
       try {
-        fs.renameSync(filePath, destPath);
+        if (isCrossDrive) {
+          fs.copyFileSync(filePath, destPath);
+        } else {
+          try {
+            fs.renameSync(filePath, destPath);
+          } catch (renameErr) {
+            fs.copyFileSync(filePath, destPath);
+          }
+        }
+        if (destPath.toLowerCase().endsWith(".mkv") && !destPath.includes("_FEHLER")) {
+          mkvToConvert.push(destPath);
+        }
         count++;
       } catch (err) {
-        console.error(`Fehler beim Verschieben von ${filePath}:`, err);
+        console.error(`Fehler beim Importieren von ${filePath}:`, err);
       }
     });
     
-    alert(`${count} Datei(en) erfolgreich verschoben!`);
+    const actionWord = isCrossDrive ? "in die App kopiert" : "verschoben";
+    if (typeof showVideoToast === "function") showVideoToast(`✅ ${count} Datei(en) erfolgreich ${actionWord}!`);
   }
   
   closeMediaFinder();
   loadMusic();
   loadVideos();
+  if (typeof renderLogosGrid === "function") renderLogosGrid();
+  if (mkvToConvert.length > 0 && typeof enqueueMkvConversions === "function") {
+    enqueueMkvConversions(mkvToConvert);
+  }
+  if (typeof ThumbnailPreloader !== "undefined") {
+    ThumbnailPreloader.preloadAllThumbnailsPermanently().catch(() => {});
+  }
 }
 
 window.openMediaFinder = openMediaFinder;
@@ -16436,10 +17302,126 @@ window.loadSnapshotsGallery = function() {
 // ============================================================
 let mixerModalAnimId = null;
 
+function syncEqHostAndButton() {
+  const modal = document.getElementById("equalizerModal");
+  const container = document.getElementById("videoMainContainer");
+  const fsEqBtn = document.getElementById("fsEqBtn");
+  const isOpen = Boolean(modal && !modal.classList.contains("hidden"));
+
+  if (modal) {
+    if (container && document.fullscreenElement === container) {
+      if (modal.parentElement !== container) container.appendChild(modal);
+    } else if (modal.parentElement !== document.body) {
+      document.body.appendChild(modal);
+    }
+  }
+  if (fsEqBtn) {
+    fsEqBtn.classList.toggle("active", isOpen);
+  }
+}
+
+function clampEqWindowToBounds(winEl) {
+  if (!winEl || winEl.dataset.dragged !== "1") return;
+  const rect = winEl.getBoundingClientRect();
+  const w = rect.width || winEl.offsetWidth || 880;
+  const minLeft = -(w - 120);
+  const maxLeft = Math.max(0, window.innerWidth - 120);
+  const minTop = document.fullscreenElement ? 0 : 36;
+  const maxTop = Math.max(minTop, window.innerHeight - 48);
+
+  const curLeft = parseFloat(winEl.style.left);
+  const curTop = parseFloat(winEl.style.top);
+  if (!isNaN(curLeft)) {
+    winEl.style.left = Math.max(minLeft, Math.min(maxLeft, curLeft)) + "px";
+  }
+  if (!isNaN(curTop)) {
+    winEl.style.top = Math.max(minTop, Math.min(maxTop, curTop)) + "px";
+  }
+}
+
+window.clampEqualizerModalPosition = function() {
+  const win = document.getElementById("equalizerModalWindow");
+  if (win) clampEqWindowToBounds(win);
+};
+
+function initDraggableEqualizerModal() {
+  const win = document.getElementById("equalizerModalWindow");
+  const header = document.getElementById("equalizerModalHeader");
+  if (!win || !header || header.dataset.dragInit === "1") return;
+  header.dataset.dragInit = "1";
+
+  let isDragging = false;
+  let startX = 0;
+  let startY = 0;
+  let origLeft = 0;
+  let origTop = 0;
+
+  header.addEventListener("mousedown", (e) => {
+    if (e.button !== 0) return;
+    if (e.target.closest("button, select, input, canvas, option")) return;
+    e.preventDefault();
+    e.stopPropagation();
+
+    const rect = win.getBoundingClientRect();
+    win.style.transform = "none";
+    win.style.left = rect.left + "px";
+    win.style.top = rect.top + "px";
+    win.dataset.dragged = "1";
+
+    isDragging = true;
+    startX = e.clientX;
+    startY = e.clientY;
+    origLeft = rect.left;
+    origTop = rect.top;
+    document.body.style.userSelect = "none";
+  });
+
+  window.addEventListener("mousemove", (e) => {
+    if (!isDragging) return;
+    const dx = e.clientX - startX;
+    const dy = e.clientY - startY;
+    const rect = win.getBoundingClientRect();
+    const w = rect.width || win.offsetWidth || 880;
+    const minLeft = -(w - 120);
+    const maxLeft = Math.max(0, window.innerWidth - 120);
+    const minTop = document.fullscreenElement ? 0 : 36;
+    const maxTop = Math.max(minTop, window.innerHeight - 48);
+
+    win.style.left = Math.max(minLeft, Math.min(maxLeft, origLeft + dx)) + "px";
+    win.style.top = Math.max(minTop, Math.min(maxTop, origTop + dy)) + "px";
+    if (typeof window.wakeFullscreenHud === "function") window.wakeFullscreenHud();
+  });
+
+  window.addEventListener("mouseup", () => {
+    if (!isDragging) return;
+    isDragging = false;
+    document.body.style.userSelect = "";
+  });
+
+  window.addEventListener("resize", () => {
+    clampEqWindowToBounds(win);
+  });
+}
+
 window.openEqualizerModal = function() {
   const modal = document.getElementById("equalizerModal");
   if (!modal) return;
+
+  if (typeof videoMenu !== "undefined" && videoMenu) {
+    videoMenu.classList.remove("show");
+  }
+
+  if (!modal.classList.contains("hidden")) {
+    window.closeEqualizerModal();
+    return;
+  }
+
   modal.classList.remove("hidden");
+  syncEqHostAndButton();
+  initDraggableEqualizerModal();
+  const win = document.getElementById("equalizerModalWindow");
+  if (win) clampEqWindowToBounds(win);
+  if (typeof window.wakeFullscreenHud === "function") window.wakeFullscreenHud();
 
   syncEqualizerModalValues();
   startEqualizerModalVUMeter();
@@ -16448,10 +17430,12 @@ window.openEqualizerModal = function() {
 window.closeEqualizerModal = function() {
   const modal = document.getElementById("equalizerModal");
   if (modal) modal.classList.add("hidden");
+  syncEqHostAndButton();
   if (mixerModalAnimId) {
     cancelAnimationFrame(mixerModalAnimId);
     mixerModalAnimId = null;
   }
+  if (typeof window.wakeFullscreenHud === "function") window.wakeFullscreenHud();
 };
 
 function syncEqualizerModalValues() {
@@ -16670,10 +17654,95 @@ function initVolumeWheelControl() {
 }
 
 // ============================================================
-// PHASE 3: GLOBAL DRAG & DROP FILE IMPORT
+// PHASE 3: GLOBAL DRAG & DROP FILE IMPORT (Electron & Tauri)
 // ============================================================
 let globalDragCounter = 0;
 const globalDropOverlay = document.getElementById("globalDropOverlay");
+
+async function handleDroppedNativePaths(droppedPaths, isFromImportModal = false) {
+  if (!Array.isArray(droppedPaths) || droppedPaths.length === 0) return;
+
+  const validPlayable = [];
+  const mkvFiles = [];
+  const otherPlayable = [];
+  const foldersToLink = [];
+
+  for (const p of droppedPaths) {
+    if (!p) continue;
+    try {
+      if (!fs.existsSync(p)) continue;
+      if (fs.statSync(p).isDirectory()) {
+        foldersToLink.push(p);
+      } else {
+        const ext = path.extname(p).toLowerCase();
+        if (IMPORT_VIDEO_EXTS.has(ext) || IMPORT_AUDIO_EXTS.has(ext)) {
+          validPlayable.push(p);
+          if (ext === ".mkv" && !p.includes("_FEHLER")) {
+            mkvFiles.push(p);
+          } else {
+            otherPlayable.push(p);
+          }
+        }
+      }
+    } catch (err) {}
+  }
+
+  if (validPlayable.length === 0 && foldersToLink.length === 0) {
+    if (typeof showVideoToast === "function") {
+      showVideoToast("⚠️ Keine unterstützten Video- oder Audio-Dateien erkannt.");
+    }
+    return;
+  }
+
+  const allTargets = [...foldersToLink, ...validPlayable];
+  const res = await importFilePathsBatch(allTargets, isFromImportModal ? null : "link");
+
+  if (!isFromImportModal) {
+    if (otherPlayable.length > 0) {
+      if (typeof playMediaFile === "function") {
+        playMediaFile(otherPlayable[0]);
+      }
+      if (otherPlayable.length > 1) {
+        if (!currentPlaybackList) currentPlaybackList = [];
+        otherPlayable.slice(1).forEach(p => {
+          if (!currentPlaybackList.includes(p)) currentPlaybackList.push(p);
+        });
+        if (typeof renderQueueDrawer === "function") renderQueueDrawer();
+      }
+    } else if ((mkvFiles.length > 0 || (res && res.queuedMkv > 0)) && foldersToLink.length === 0) {
+      const convertModalEl = document.getElementById("convertModal");
+      if (convertModalEl && convertModalEl.classList.contains("hidden")) {
+        convertModalEl.classList.remove("hidden");
+        if (typeof syncKeepOriginalMkvUI === "function") syncKeepOriginalMkvUI();
+        if (typeof updateConvertUI === "function") updateConvertUI();
+      }
+    }
+  }
+}
+
+window.__onTauriDragDrop = async function(ev) {
+  if (!ev || !ev.type) return;
+  const convertModalEl = document.getElementById("convertModal");
+  const isConvertModalOpen = Boolean(convertModalEl && !convertModalEl.classList.contains("hidden"));
+
+  if (ev.type === "enter" || ev.type === "over") {
+    if (isConvertModalOpen) {
+      if (typeof setImportDropZoneHighlight === "function") setImportDropZoneHighlight(true);
+    } else if (globalDropOverlay) {
+      globalDropOverlay.classList.remove("hidden");
+    }
+  } else if (ev.type === "leave") {
+    if (typeof setImportDropZoneHighlight === "function") setImportDropZoneHighlight(false);
+    if (globalDropOverlay) globalDropOverlay.classList.add("hidden");
+  } else if (ev.type === "drop") {
+    if (typeof setImportDropZoneHighlight === "function") setImportDropZoneHighlight(false);
+    if (globalDropOverlay) globalDropOverlay.classList.add("hidden");
+    const paths = Array.isArray(ev.paths) ? ev.paths : [];
+    if (paths.length > 0) {
+      await handleDroppedNativePaths(paths, isConvertModalOpen);
+    }
+  }
+};
 
 window.addEventListener("dragenter", (e) => {
   e.preventDefault();
@@ -16697,40 +17766,18 @@ window.addEventListener("dragleave", (e) => {
   }
 });
 
-window.addEventListener("drop", (e) => {
+window.addEventListener("drop", async (e) => {
   e.preventDefault();
   globalDragCounter = 0;
   if (globalDropOverlay) globalDropOverlay.classList.add("hidden");
 
-  const files = Array.from(e.dataTransfer.files || []);
+  const files = Array.from(e.dataTransfer?.files || []);
   if (files.length === 0) return;
 
-  const videoExts = ['.mp4', '.m4v', '.webm', '.ogv', '.mkv', '.avi', '.mov', '.wmv', '.flv'];
-  const audioExts = ['.mp3', '.wav', '.ogg', '.aac', '.flac', '.m4a', '.wma'];
-  const allExts = [...videoExts, ...audioExts];
+  const droppedPaths = files.map(f => window.getNativeFilePath(f)).filter(Boolean);
+  if (droppedPaths.length === 0) return;
 
-  const validPaths = [];
-  for (const f of files) {
-    const ext = path.extname(f.path).toLowerCase();
-    if (allExts.includes(ext)) {
-      validPaths.push(f.path);
-    }
-  }
-
-  if (validPaths.length > 0) {
-    const firstFile = validPaths[0];
-    if (typeof playMediaFile === "function") {
-      playMediaFile(firstFile);
-    }
-    if (validPaths.length > 1) {
-      if (!currentPlaybackList) currentPlaybackList = [];
-      validPaths.slice(1).forEach(p => {
-        if (!currentPlaybackList.includes(p)) currentPlaybackList.push(p);
-      });
-      if (typeof renderQueueDrawer === "function") renderQueueDrawer();
-    }
-    showVideoToast(`📥 ${validPaths.length} Datei(en) importiert & gestartet!`);
-  }
+  await handleDroppedNativePaths(droppedPaths, false);
 });
 
 // Initial calls on app start
@@ -17242,6 +18289,12 @@ window.startStreamPlayback = function(customInput, customPlatform) {
   let embedUrl = "";
   let chatUrl = "";
   let displayName = "";
+  const isTauriHttps = Boolean(
+    window.__tauriRuntime &&
+    window.location &&
+    window.location.protocol === "https:" &&
+    window.location.hostname === "tauri.localhost"
+  );
 
   if (platform === "twitch") {
     const channel = parseTwitchChannel(inputVal);
@@ -17251,8 +18304,13 @@ window.startStreamPlayback = function(customInput, customPlatform) {
       return;
     }
     displayName = channel;
-    embedUrl = `http://127.0.0.1:${STREAM_BRIDGE_PORT}/twitch?channel=${encodeURIComponent(channel)}`;
-    chatUrl = `http://127.0.0.1:${STREAM_BRIDGE_PORT}/twitch-chat?channel=${encodeURIComponent(channel)}`;
+    if (isTauriHttps) {
+      embedUrl = `https://player.twitch.tv/?channel=${encodeURIComponent(channel)}&parent=tauri.localhost&autoplay=true&muted=false`;
+      chatUrl = `https://www.twitch.tv/embed/${encodeURIComponent(channel)}/chat?parent=tauri.localhost&darkpopout`;
+    } else {
+      embedUrl = `http://127.0.0.1:${STREAM_BRIDGE_PORT}/twitch?channel=${encodeURIComponent(channel)}`;
+      chatUrl = `http://127.0.0.1:${STREAM_BRIDGE_PORT}/twitch-chat?channel=${encodeURIComponent(channel)}`;
+    }
     currentActiveStream = { platform: 'twitch', id: channel, name: channel };
     addStreamLog("start", "TWITCH", `Starte Twitch-Stream für Kanal: "${channel}"`);
   } else {
@@ -17263,8 +18321,13 @@ window.startStreamPlayback = function(customInput, customPlatform) {
       return;
     }
     displayName = customInput && customInput === inputVal ? inputVal : `YouTube (${videoId})`;
-    embedUrl = `http://127.0.0.1:${STREAM_BRIDGE_PORT}/youtube?v=${encodeURIComponent(videoId)}`;
-    chatUrl = `http://127.0.0.1:${STREAM_BRIDGE_PORT}/youtube-chat?v=${encodeURIComponent(videoId)}`;
+    if (isTauriHttps) {
+      embedUrl = `https://www.youtube-nocookie.com/embed/${encodeURIComponent(videoId)}?autoplay=1&enablejsapi=1&rel=0&modestbranding=1`;
+      chatUrl = `https://www.youtube.com/live_chat?v=${encodeURIComponent(videoId)}&embed_domain=tauri.localhost`;
+    } else {
+      embedUrl = `http://127.0.0.1:${STREAM_BRIDGE_PORT}/youtube?v=${encodeURIComponent(videoId)}`;
+      chatUrl = `http://127.0.0.1:${STREAM_BRIDGE_PORT}/youtube-chat?v=${encodeURIComponent(videoId)}`;
+    }
     currentActiveStream = { platform: 'youtube', id: videoId, name: displayName };
     addStreamLog("start", "YOUTUBE", `Starte YouTube Live-Stream für Video-ID: "${videoId}"`);
   }
@@ -17742,7 +18805,8 @@ window.manualCheckAppUpdate = async function(isSilentStartup = false) {
         if (sub) sub.innerText = res.releaseName || `Version ${res.latestVersion}`;
         if (notes) notes.innerText = res.releaseNotes || "Keine Update-Notizen vorhanden.";
         if (size && res.assetSize) {
-          size.innerText = `Dateigröße: ${(res.assetSize / (1024 * 1024)).toFixed(1)} MB (${res.assetName || 'app.asar'})`;
+          const fallbackName = window.__tauriRuntime ? 'my_view_app.exe' : 'app.asar';
+          size.innerText = `Dateigröße: ${(res.assetSize / (1024 * 1024)).toFixed(1)} MB (${res.assetName || fallbackName})`;
         }
       }
 
@@ -17787,6 +18851,8 @@ window.startAppUpdateDownload = async function() {
     const res = await ipcRenderer.invoke("download-app-update", {
       downloadUrl: currentUpdateData.downloadUrl,
       assetId: currentUpdateData.assetId,
+      assetSize: currentUpdateData.assetSize || 0,
+      assetName: currentUpdateData.assetName || "",
       repo: currentUpdateData.repo,
       token: getUpdateToken()
     });

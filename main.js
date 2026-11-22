@@ -2,6 +2,8 @@ const { app, BrowserWindow, ipcMain, globalShortcut, Tray, Menu, session, dialog
 const path = require("path")
 const fs = require("fs")
 const { spawn } = require("child_process")
+const { pipeline } = require("stream/promises")
+const { Readable, Transform } = require("stream")
 
 const http = require("http")
 
@@ -367,6 +369,30 @@ ipcMain.handle("show-save-dialog", async (event, options) => {
   return await dialog.showSaveDialog(win, options);
 });
 
+try { ipcMain.removeHandler("pick-media-files"); } catch (e) {}
+ipcMain.handle("pick-media-files", async (event) => {
+  const win = BrowserWindow.fromWebContents(event.sender) || mainWindow;
+  const res = await dialog.showOpenDialog(win, {
+    title: "Videos & Musik auswählen",
+    properties: ["openFile", "multiSelections"],
+    filters: [
+      { name: "Medien (Video & Audio)", extensions: ["mp4", "mkv", "webm", "avi", "mov", "m4v", "wmv", "flv", "ogv", "gif", "mp3", "wav", "flac", "ogg", "m4a", "aac", "wma"] },
+      { name: "Alle Dateien", extensions: ["*"] }
+    ]
+  });
+  return { canceled: res.canceled, filePaths: res.filePaths || [] };
+});
+
+try { ipcMain.removeHandler("pick-media-folder"); } catch (e) {}
+ipcMain.handle("pick-media-folder", async (event) => {
+  const win = BrowserWindow.fromWebContents(event.sender) || mainWindow;
+  const res = await dialog.showOpenDialog(win, {
+    title: "Medien-Ordner auswählen",
+    properties: ["openDirectory", "multiSelections"]
+  });
+  return { canceled: res.canceled, folderPaths: res.filePaths || [] };
+});
+
 // ============================================================
 // STREAM AUTHENTICATION & SUB BENEFIT IPC HANDLERS
 // ============================================================
@@ -537,7 +563,7 @@ ipcMain.handle("check-app-update", async (event, { repo = "tobiaslechert445-gif/
       'Accept': 'application/vnd.github.v3+json'
     };
     if (token && token.trim()) {
-      headers['Authorization'] = `token ${token.trim()}`;
+      headers['Authorization'] = `Bearer ${token.trim()}`;
     }
 
     const res = await fetch(apiUrl, { headers });
@@ -588,7 +614,7 @@ ipcMain.handle("download-app-update", async (event, { downloadUrl, assetId, repo
     let url = downloadUrl;
     const headers = { 'User-Agent': 'My-Media-App-Updater' };
     if (token && token.trim()) {
-      headers['Authorization'] = `token ${token.trim()}`;
+      headers['Authorization'] = `Bearer ${token.trim()}`;
       if (assetId && repo) {
         url = `https://api.github.com/repos/${repo}/releases/assets/${assetId}`;
         headers['Accept'] = 'application/octet-stream';
@@ -602,25 +628,26 @@ ipcMain.handle("download-app-update", async (event, { downloadUrl, assetId, repo
 
     const totalBytes = parseInt(res.headers.get("content-length") || "0", 10);
     let downloadedBytes = 0;
+
+    const progressStream = new Transform({
+      transform(chunk, encoding, callback) {
+        downloadedBytes += chunk.length;
+        if (totalBytes > 0) {
+          const percent = Math.min(100, Math.round((downloadedBytes / totalBytes) * 100));
+          event.sender.send("app-update-progress", {
+            percent,
+            downloadedBytes,
+            totalBytes
+          });
+        }
+        callback(null, chunk);
+      }
+    });
+
+    const webStream = Readable.fromWeb(res.body);
     const fileStream = fs.createWriteStream(tempFile);
 
-    const reader = res.body.getReader();
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      downloadedBytes += value.length;
-      fileStream.write(Buffer.from(value));
-      const percent = totalBytes > 0 ? Math.min(100, Math.round((downloadedBytes / totalBytes) * 100)) : 0;
-      event.sender.send("app-update-progress", {
-        percent,
-        downloadedBytes,
-        totalBytes
-      });
-    }
-
-    await new Promise((resolve, reject) => {
-      fileStream.end(err => err ? reject(err) : resolve());
-    });
+    await pipeline(webStream, progressStream, fileStream);
 
     return { success: true, filePath: tempFile, downloadedBytes };
   } catch (err) {

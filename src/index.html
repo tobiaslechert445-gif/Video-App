@@ -329,6 +329,87 @@ My View
   <span id="videoSeekTime" style="opacity: 0.8; font-size: 13px;">(00:00 / 00:00)</span>
 </div>
 
+<!-- SEPARATE YOUTUBE-STYLE TRANSPARENTE PILL VOLLBILD-UI -->
+<div id="videoFullscreenHud" class="yt-fs-hud" onclick="event.stopPropagation()" ondblclick="event.stopPropagation()">
+  <div class="yt-fs-top">
+    <div id="fsVideoTitle" class="fs-video-title">Video</div>
+  </div>
+
+  <div class="yt-fs-bottom">
+    <div class="yt-fs-scrubber-wrap">
+      <input type="range" id="fsProgressBar" class="yt-fs-scrubber" value="0" min="0" max="100" step="0.1">
+    </div>
+
+    <div class="yt-fs-pills-row">
+      <!-- LINKE PILL: Play, Next/Prev, Frame-Step, Lautstärke & Zeit -->
+      <div class="yt-fs-pill yt-fs-left-pill">
+        <button id="fsPlayBtn" class="yt-fs-icon-btn" onclick="toggleFullscreenPlayPause()" title="Abspielen / Pause (Klick / Leertaste)">
+          <svg id="fsPlayIcon" width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><polygon points="6 4 20 12 6 20 6 4"></polygon></svg>
+        </button>
+
+        <button id="fsPrevBtn" class="yt-fs-icon-btn" onclick="document.getElementById('prevBtn')?.click()" title="Vorheriges Video">
+          <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polygon points="19 20 9 12 19 4 19 20"></polygon><line x1="5" y1="19" x2="5" y2="5"></line></svg>
+        </button>
+
+        <button id="fsNextBtn" class="yt-fs-icon-btn" onclick="document.getElementById('nextBtn')?.click()" title="Nächstes Video (N)">
+          <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polygon points="5 4 15 12 5 20 5 4"></polygon><line x1="19" y1="5" x2="19" y2="19"></line></svg>
+        </button>
+
+        <button id="fsStepBackBtn" class="yt-fs-icon-btn" onclick="document.getElementById('stepBackBtn')?.click()" title="1 Frame zurück (,)">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="6" y1="5" x2="6" y2="19"></line><polygon points="18 19 9 12 18 5 18 19"></polygon></svg>
+        </button>
+
+        <button id="fsStepForwardBtn" class="yt-fs-icon-btn" onclick="document.getElementById('stepForwardBtn')?.click()" title="1 Frame vor (.)">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="6 5 15 12 6 19 6 5"></polygon><line x1="18" y1="5" x2="18" y2="19"></line></svg>
+        </button>
+
+        <div class="yt-fs-volume-box">
+          <button id="fsMuteBtn" class="yt-fs-icon-btn" onclick="document.getElementById('volumeBtn')?.click()" title="Stumm / Laut">
+            <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon><path d="M15.54 8.46a5 5 0 0 1 0 7.07"></path><path d="M19.07 4.93a10 10 0 0 1 0 14.14"></path></svg>
+          </button>
+          <input type="range" id="fsVolumeSlider" class="yt-fs-volume-slider" min="0" max="1.5" step="0.05" value="1">
+        </div>
+
+        <span id="fsTimeDisplay" class="yt-fs-time">0:00 / 0:00</span>
+      </div>
+
+      <!-- RECHTE PILL: App-Eigene SVG-Symbole (Like, A-B Schleife, Queue, Screenshot, Ambient, Optionen-Menü, Vollbild) -->
+      <div class="yt-fs-pill yt-fs-right-pill">
+        <button id="fsLikeBtn" class="yt-fs-icon-btn" onclick="document.getElementById('likeBtn')?.click()" title="Zu Favoriten hinzufügen">
+          <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"></path></svg>
+        </button>
+
+        <button id="fsAbLoopBtn" class="yt-fs-icon-btn" onclick="document.getElementById('abLoopBtn')?.click()" title="A–B Abschnitt wiederholen (Taste L)" style="position: relative;">
+          <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="17 1 21 5 17 9"></polyline><path d="M3 11V9a4 4 0 0 1 4-4h14"></path><polyline points="7 23 3 19 7 15"></polyline><path d="M21 13v2a4 4 0 0 1-4 4H3"></path></svg>
+          <span id="fsAbLoopBadge" class="ab-loop-badge hidden"></span>
+        </button>
+
+        <button id="fsSnapshotBtn" class="yt-fs-icon-btn" onclick="document.getElementById('snapshotBtn')?.click()" title="Video-Frame als PNG-Screenshot speichern (Taste S)">
+          <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"></path><circle cx="12" cy="13" r="4"></circle></svg>
+        </button>
+
+        <button id="fsAmbientBtn" class="yt-fs-icon-btn" onclick="document.getElementById('ambientBtn')?.click()" title="Ambient Kino-Leuchten">
+          <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="5"></circle><line x1="12" y1="1" x2="12" y2="3"></line><line x1="12" y1="21" x2="12" y2="23"></line><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"></line><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"></line><line x1="1" y1="12" x2="3" y2="12"></line><line x1="21" y1="12" x2="23" y2="12"></line><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"></line><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"></line></svg>
+        </button>
+
+        <button id="fsEqBtn" class="yt-fs-icon-btn" onclick="openEqualizerModal()" title="Studio-Equalizer &amp; Sound-Mischpult (Frei beweglich)">
+          <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="4" y1="21" x2="4" y2="14"></line><line x1="4" y1="10" x2="4" y2="3"></line><line x1="12" y1="21" x2="12" y2="12"></line><line x1="12" y1="8" x2="12" y2="3"></line><line x1="20" y1="21" x2="20" y2="16"></line><line x1="20" y1="12" x2="20" y2="3"></line><line x1="1" y1="14" x2="7" y2="14"></line><line x1="9" y1="8" x2="15" y2="8"></line><line x1="17" y1="16" x2="23" y2="16"></line></svg>
+        </button>
+
+        <div id="fsMenuWrapper" style="position: relative; display: flex; align-items: center;">
+          <button id="fsMenuBtn" class="yt-fs-icon-btn" title="Wiedergabe-Optionen (Tempo, Equalizer, Sync, Schlummerfunktion, Bild-in-Bild)">
+            <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>
+          </button>
+        </div>
+
+        <button id="fsExitBtn" class="yt-fs-icon-btn" onclick="toggleVideoFullscreen()" title="Vollbild verlassen (Taste F / Esc)">
+          <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 3v3a2 2 0 0 1-2 2H3m18 0h-3a2 2 0 0 1-2-2V3m0 18v-3a2 2 0 0 1 2-2h3M3 16h3a2 2 0 0 1 2 2v3"></path></svg>
+        </button>
+      </div>
+    </div>
+  </div>
+</div>
+
 </div>
 
 <h2 class="moreTitle">Weitere Videos</h2>
@@ -999,22 +1080,62 @@ My View
 </div>
 
 <div id="convertModal" class="convert-modal-overlay hidden">
-    <div class="convert-modal-content">
-        <div class="convert-modal-header">
-    <h3>Konverter & Import</h3>
+    <div class="convert-modal-content" style="max-width: 680px; width: 92%;">
+        <div class="convert-modal-header" style="flex-wrap: wrap; gap: 10px;">
+    <h3 style="margin: 0;">Medien-Import &amp; Konverter</h3>
     
-    <div style="display: flex; gap: 10px; align-items: center;">
-        <button onclick="openMediaFinder()" style="background: rgba(255, 255, 255, 0.1); color: #fff; border: 1px solid rgba(255,255,255,0.2); padding: 8px 16px; border-radius: 8px; font-weight: bold; cursor: pointer; transition: 0.2s;" onmouseover="this.style.background='var(--accent)'; this.style.color='#000';" onmouseout="this.style.background='rgba(255, 255, 255, 0.1)'; this.style.color='#fff';">
-            PC durchsuchen
+    <div style="display: flex; gap: 8px; align-items: center; flex-wrap: wrap;">
+        <button onclick="openMediaFinder()" style="background: rgba(255, 255, 255, 0.1); color: #fff; border: 1px solid rgba(255,255,255,0.2); padding: 8px 13px; border-radius: 8px; font-weight: bold; cursor: pointer; transition: 0.2s;" onmouseover="this.style.background='var(--accent)'; this.style.color='#000';" onmouseout="this.style.background='rgba(255, 255, 255, 0.1)'; this.style.color='#fff';">
+            🔍 PC durchsuchen
         </button>
-        <button onclick="openMediaImporter()" style="background: var(--accent); color: #000; border: none; padding: 8px 16px; border-radius: 8px; font-weight: bold; cursor: pointer; transition: 0.2s;">
-            Dateien Importieren
+        <button onclick="openFolderImporter()" style="background: rgba(255, 255, 255, 0.1); color: #fff; border: 1px solid rgba(255,255,255,0.2); padding: 8px 13px; border-radius: 8px; font-weight: bold; cursor: pointer; transition: 0.2s;" onmouseover="this.style.background='var(--accent)'; this.style.color='#000';" onmouseout="this.style.background='rgba(255, 255, 255, 0.1)'; this.style.color='#fff';">
+            📁 Ordner einbinden
+        </button>
+        <button onclick="openMediaImporter()" style="background: var(--accent); color: #000; border: none; padding: 8px 14px; border-radius: 8px; font-weight: bold; cursor: pointer; transition: 0.2s;">
+            🎬 Dateien importieren
         </button>
         <button class="convert-close-btn" onclick="toggleConvertModal()">✕</button>
     </div>
 </div>
 
-<input type="file" id="fileImporter" multiple accept=".mp3,.mp4,.mkv,.webm,.gif" style="display: none;" onchange="handleMediaImport(event)">
+<!-- Import-Modus & Drop-Zone -->
+<div style="padding: 14px 20px 6px; border-bottom: 1px solid rgba(255,255,255,0.08);">
+    <div class="mkv-keep-toggle-row">
+        <div class="mkv-keep-toggle-info">
+            <span class="mkv-keep-toggle-title">Original-MKV-Datei nach Umwandlung beibehalten</span>
+            <span id="keepOriginalMkvHint" class="mkv-keep-toggle-hint">AN — Original-.mkv bleibt erhalten (MP4 wird zusätzlich erstellt)</span>
+        </div>
+        <label class="mkv-toggle-switch" title="Original-MKV beibehalten (AN) oder nach MP4-Umwandlung löschen (AUS)">
+            <input type="checkbox" id="keepOriginalMkvToggle" checked onchange="toggleKeepOriginalMkv(this.checked)">
+            <span class="mkv-toggle-slider"></span>
+        </label>
+    </div>
+
+    <div style="display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; margin-bottom: 10px;">
+        <label style="font-size: 12px; color: var(--text-muted); font-weight: 600;">Import-Methode für Videos &amp; Musik:</label>
+        <select id="importModeSelect" style="background: #222; color: #fff; border: 1px solid rgba(255,255,255,0.16); border-radius: 6px; padding: 6px 10px; font-size: 12px; cursor: pointer;">
+            <option value="link" selected>⚡ Schnell-Verknüpfen (Originalort behalten – 0 Sek. Wartezeit)</option>
+            <option value="copy">📥 In App-Ordner kopieren (Kopie in media/ anlegen)</option>
+        </select>
+    </div>
+
+    <div id="importDropZone" onclick="openMediaImporter()" style="border: 2px dashed rgba(255,255,255,0.18); border-radius: 10px; padding: 14px; text-align: center; cursor: pointer; background: rgba(255,255,255,0.02); transition: 0.2s; margin-bottom: 8px;">
+        <div style="font-size: 13px; color: #ddd; font-weight: 600;">Videos, Musik oder ganze Ordner hierher ziehen &amp; ablegen</div>
+        <div style="font-size: 11px; color: var(--text-muted); margin-top: 3px;">Unterstützt MP4, MKV, WEBM, AVI, MOV, M4V, MP3, FLAC, WAV, OGG u.v.m.</div>
+    </div>
+
+    <div id="mediaImportProgressBox" class="hidden" style="background: rgba(29, 185, 84, 0.08); border: 1px solid rgba(29, 185, 84, 0.35); border-radius: 8px; padding: 10px 12px; margin-bottom: 8px;">
+        <div style="display: flex; justify-content: space-between; font-size: 12px; margin-bottom: 5px;">
+            <span id="mediaImportProgressText">Importiere Dateien...</span>
+            <span id="mediaImportProgressPercent">0%</span>
+        </div>
+        <div style="width: 100%; height: 6px; background: rgba(255,255,255,0.1); border-radius: 3px; overflow: hidden;">
+            <div id="mediaImportProgressBar" style="width: 0%; height: 100%; background: var(--accent); transition: width 0.15s ease;"></div>
+        </div>
+    </div>
+</div>
+
+<input type="file" id="fileImporter" multiple accept=".mp4,.mkv,.webm,.avi,.mov,.m4v,.wmv,.flv,.ogv,.gif,.mp3,.wav,.flac,.ogg,.m4a,.aac,.wma" style="display: none;" onchange="handleMediaImport(event)">
         <div id="convertModalBody" class="convert-modal-body">
             <p>Keine Umwandlungen aktiv.</p>
         </div>
@@ -2092,11 +2213,11 @@ My View
                         <div style="padding-top: 10px; border-top: 1px solid rgba(255,255,255,0.06); margin-top: 6px;">
                             <div style="font-size: 12px; font-weight: bold; margin-bottom: 6px;">Alternative: Manuelles Update per Datei</div>
                             <p style="font-size: 12px; color: var(--text-muted); margin: 0 0 10px 0;">
-                                Du hast deinem Freund eine neue <code>app.asar</code>-Datei direkt (z. B. per Discord) geschickt? Er kann sie hier mit einem Klick auswählen, und die App aktualisiert sich automatisch.
+                                Du hast deinem Freund eine neue <code>my_view_app.exe</code> oder <code>app.asar</code> direkt (z. B. per Discord) geschickt? Er kann sie hier mit einem Klick auswählen, und die App aktualisiert sich automatisch.
                             </p>
                             <button class="modalBtn" onclick="installLocalUpdateAsar()" style="display: flex; align-items: center; gap: 8px; background: #2a2a2a; padding: 8px 14px;">
                                 <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>
-                                <span>Lokale Update-Datei (.asar) auswählen &amp; installieren</span>
+                                <span>Lokale Update-Datei (.exe / .asar) auswählen &amp; installieren</span>
                             </button>
                         </div>
                     </div>
@@ -3774,21 +3895,34 @@ My View
                 </div>
                 <div style="display: flex; align-items: center; gap: 10px;">
                     <input type="text" id="mfSearchInput" placeholder="Nach Dateien suchen..." oninput="onMfSearchInput()" style="width: 180px; padding: 6px 10px; border-radius: 6px; border: 1px solid rgba(255,255,255,0.1); background: rgba(0,0,0,0.3); color: white; font-size: 12px;">
-                    <button id="mfScanBtn" onclick="startMediaScan()" style="background: rgba(255, 255, 255, 0.08); color: #fff; border: 1px solid rgba(255, 255, 255, 0.15); padding: 6px 15px; border-radius: 6px; font-weight: bold; cursor: pointer; transition: 0.2s; font-size: 12px;">
+                    <button id="mfScanBtn" onclick="startMediaScan(true)" style="background: rgba(255, 255, 255, 0.08); color: #fff; border: 1px solid rgba(255, 255, 255, 0.15); padding: 6px 15px; border-radius: 6px; font-weight: bold; cursor: pointer; transition: 0.2s; font-size: 12px;">
                         Aktualisieren
                     </button>
                 </div>
             </div>
 
-            <!-- Options Row (Deduplication, Games filter) -->
-            <div style="margin-bottom: 12px; display: flex; gap: 20px; align-items: center; padding: 6px 10px; background: rgba(255,255,255,0.01); border-radius: 6px; border: 1px solid rgba(255,255,255,0.03); font-size: 11px; color: var(--text-muted);">
+            <!-- Options Row (Media Types, Deduplication, Games filter) -->
+            <div style="margin-bottom: 12px; display: flex; gap: 16px; flex-wrap: wrap; align-items: center; padding: 6px 10px; background: rgba(255,255,255,0.01); border-radius: 6px; border: 1px solid rgba(255,255,255,0.03); font-size: 11px; color: var(--text-muted);">
+                <label style="display: flex; align-items: center; gap: 5px; cursor: pointer; color: #fff; font-weight: 600;">
+                    <input type="checkbox" id="mfFilterVideos" checked onchange="restartMediaFinderScan()" style="cursor: pointer; accent-color: var(--accent);">
+                    🎬 Videos
+                </label>
+                <label style="display: flex; align-items: center; gap: 5px; cursor: pointer;">
+                    <input type="checkbox" id="mfFilterAudio" onchange="restartMediaFinderScan()" style="cursor: pointer; accent-color: var(--accent);">
+                    🎵 Musik
+                </label>
+                <label style="display: flex; align-items: center; gap: 5px; cursor: pointer;">
+                    <input type="checkbox" id="mfFilterImages" onchange="restartMediaFinderScan()" style="cursor: pointer; accent-color: var(--accent);">
+                    🖼️ Bilder
+                </label>
+                <span style="color: rgba(255,255,255,0.15);">|</span>
                 <label style="display: flex; align-items: center; gap: 6px; cursor: pointer;">
                     <input type="checkbox" id="mfOptDeduplicate" checked onchange="renderMediaFinderResults()" style="cursor: pointer; accent-color: var(--accent);">
-                    Duplikate ausblenden (gleicher Name &amp; Größe)
+                    Duplikate ausblenden
                 </label>
                 <label style="display: flex; align-items: center; gap: 6px; cursor: pointer;">
-                    <input type="checkbox" id="mfOptFilterGames" checked onchange="startMediaScan()" style="cursor: pointer; accent-color: var(--accent);">
-                    System- &amp; Spieldateien ausblenden (Klicks &amp; FX &lt; 500KB)
+                    <input type="checkbox" id="mfOptFilterGames" checked onchange="restartMediaFinderScan()" style="cursor: pointer; accent-color: var(--accent);">
+                    System- &amp; Spieldateien ausblenden
                 </label>
             </div>
 
@@ -3870,9 +4004,9 @@ My View
   </div>
 
   <!-- STUDIO EQUALIZER POP-UP MODAL -->
-  <div id="equalizerModal" class="equalizer-modal-overlay hidden" onclick="if(event.target===this) closeEqualizerModal()">
-    <div class="equalizer-modal-window">
-      <div class="eq-modal-header">
+  <div id="equalizerModal" class="equalizer-modal-overlay hidden">
+    <div id="equalizerModalWindow" class="equalizer-modal-window" onclick="event.stopPropagation()" ondblclick="event.stopPropagation()">
+      <div id="equalizerModalHeader" class="eq-modal-header" title="Hier ziehen, um den Equalizer frei zu verschieben">
         <div style="display: flex; align-items: center; gap: 12px;">
           <div style="background: color-mix(in srgb, var(--accent) 15%, transparent); border: 1px solid var(--accent); padding: 7px; border-radius: 8px; display: flex; align-items: center; justify-content: center;">
             <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
@@ -4046,12 +4180,13 @@ My View
   <div id="globalDropOverlay" class="global-drop-overlay hidden">
     <div class="global-drop-box">
       <div class="global-drop-icon">📥</div>
-      <h2>Mediendatei hier ablegen</h2>
-      <p>Lass Audio- oder Videodateien los, um sie sofort abzuspielen!</p>
+      <h2>Mediendatei oder Ordner hier ablegen</h2>
+      <p>Videos &amp; Musik werden automatisch importiert und sofort abgespielt!</p>
     </div>
   </div>
 
 
+  <script src="./tauri-bridge.js"></script>
   <script src="./brushEngine.js"></script>
   <script src="./cursorEngine.js"></script>
   <script src="./renderer.js"></script>
