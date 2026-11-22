@@ -8951,6 +8951,323 @@ input[type=range].vertical-slider {
     border-top: 1px solid rgba(255, 255, 255, 0.08);
 }
 
+/* ============================================================
+   VIDEO-OPTIONSMENÜ – AUFGERÄUMTES LAYOUT (v1.3.1)
+   Überschreibt die generischen .player button / .controls-right button Regeln
+   ============================================================ */
+#videoMenu {
+    width: 300px;
+    min-width: 0;
+    max-width: calc(100vw - 24px);
+    max-height: min(72vh, 620px);
+    overflow-y: auto;
+    overflow-x: hidden;
+    overscroll-behavior: contain;
+    padding: 6px;
+    gap: 0;
+    text-align: left;
+    background: rgba(22, 22, 24, 0.97);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: 14px;
+    box-shadow: 0 18px 40px rgba(0, 0, 0, 0.65);
+    scrollbar-width: thin;
+    scrollbar-color: rgba(255, 255, 255, 0.18) transparent;
+}
+#videoMenu::-webkit-scrollbar { width: 6px; }
+#videoMenu::-webkit-scrollbar-thumb { background: rgba(255, 255, 255, 0.18); border-radius: 999px; }
+
+/* Basis-Reset aller Buttons im Menü (außer Equalizer) */
+#videoMenu .menuSection:not(#equalizerPanel) button {
+    width: auto;
+    height: auto;
+    min-width: 0;
+    margin: 0;
+    font-family: inherit;
+    font-size: 13px;
+    line-height: 1.25;
+    color: var(--text-main, #eaeaea);
+    filter: none;
+    transform: none;
+    flex-shrink: 0;
+    box-sizing: border-box;
+}
+#videoMenu .menuSection:not(#equalizerPanel) button:hover { filter: none; }
+#videoMenu .menuSection:not(#equalizerPanel) button:active { transform: scale(0.98); }
+
+/* Panels */
+#videoMenu .menuSection { gap: 2px; padding: 2px; }
+#videoMenu .menuSection:not(#menuMain):not(#equalizerPanel) { gap: 10px; padding: 2px 4px 6px; }
+
+/* Hauptmenü-Einträge */
+#videoMenu .menuItem {
+    display: flex;
+    align-items: center;
+    justify-content: flex-start;
+    gap: 12px;
+    width: 100%;
+    padding: 9px 12px;
+    border: none;
+    border-radius: 9px;
+    background: transparent;
+    color: var(--text-main, #eaeaea);
+    font-weight: 500;
+    text-align: left;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    transition: background 0.15s ease, color 0.15s ease;
+}
+#videoMenu .menuItem svg {
+    flex: 0 0 auto;
+    width: 16px;
+    height: 16px;
+    opacity: 0.7;
+    transition: opacity 0.15s ease, color 0.15s ease;
+}
+#videoMenu .menuItem > span:not(.menu-item-meta) {
+    flex: 1 1 auto;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+#videoMenu .menuItem:hover { background: rgba(255, 255, 255, 0.07); color: #fff; }
+#videoMenu .menuItem:hover svg { opacity: 1; color: var(--accent); }
+#videoMenu .menu-item-meta { flex: 0 0 auto; margin-left: auto; }
+
+/* Zurück-Kopf & Panel-Titel */
+#videoMenu .menuHeader {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 8px 10px;
+    border-radius: 8px;
+    color: var(--text-muted, #aaa);
+    font-size: 12.5px;
+    font-weight: 600;
+    cursor: pointer;
+}
+#videoMenu .menuHeader:hover { background: rgba(255, 255, 255, 0.07); color: #fff; }
+#videoMenu .menuLabel {
+    padding: 0 2px 8px;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.07);
+    color: var(--text-main, #fff);
+    font-weight: 700;
+    letter-spacing: 0.2px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+/* Karten-Gruppen (Sync & Bild) */
+#videoMenu .sync-group {
+    margin: 0 !important;
+    padding: 12px;
+    gap: 10px;
+    border-radius: 11px;
+    background: rgba(255, 255, 255, 0.035);
+    border: 1px solid rgba(255, 255, 255, 0.07);
+}
+#videoMenu .sync-label-row {
+    gap: 8px;
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--text-main, #eee);
+}
+#videoMenu .sync-badge { min-width: 52px; text-align: center; font-variant-numeric: tabular-nums; }
+#videoMenu .sync-slider-row {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr) auto;
+    align-items: center;
+    gap: 8px;
+}
+
+/* Schieberegler (außer Tempo & EQ, die eigene Styles haben) */
+#videoMenu input[type="range"]:not(#speedSlider):not(.eq-slider) {
+    width: 100%;
+    min-width: 0;
+    height: 18px;
+    margin: 0;
+    accent-color: var(--accent);
+    background: transparent;
+    cursor: pointer;
+}
+
+/* Kleine Schritt-Buttons (-50ms / +50ms) */
+#videoMenu .sync-step-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 54px;
+    height: 26px;
+    padding: 0 8px;
+    font-size: 11px;
+    font-weight: 700;
+    font-variant-numeric: tabular-nums;
+    color: var(--text-main, #ddd);
+    background: rgba(255, 255, 255, 0.06);
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    border-radius: 7px;
+}
+#videoMenu .sync-step-btn:hover { background: rgba(255, 255, 255, 0.14); color: #fff; }
+
+/* Reset- & Datei-Buttons */
+#videoMenu .sync-reset-btn,
+#videoMenu .sync-file-btn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    min-width: 0;
+    height: 32px;
+    padding: 0 10px;
+    font-size: 12px;
+    font-weight: 600;
+    border-radius: 8px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+#videoMenu .sync-reset-btn {
+    width: 100%;
+    color: var(--text-main, #ddd);
+    background: rgba(255, 255, 255, 0.05);
+    border: 1px solid rgba(255, 255, 255, 0.09);
+}
+#videoMenu .sync-reset-btn:hover { background: rgba(255, 255, 255, 0.12); color: #fff; }
+#videoMenu .sync-file-btn {
+    color: #fff;
+    background: color-mix(in srgb, var(--accent) 22%, transparent);
+    border: 1px solid color-mix(in srgb, var(--accent) 45%, transparent);
+}
+#videoMenu .sync-file-btn:hover { background: var(--accent); color: #000; }
+#videoMenu .sync-group > div > .sync-reset-btn,
+#videoMenu .tracks-footer-actions > button { width: auto; }
+
+/* Pillen: Tempo & Seitenverhältnis */
+#videoMenu .speed-presets-pills,
+#videoMenu .aspect-presets-grid { gap: 6px; margin-top: 0; }
+#videoMenu .speed-pill,
+#videoMenu .aspect-pill {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 100%;
+    height: 30px;
+    padding: 0 4px;
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--text-main, #ddd);
+    background: rgba(255, 255, 255, 0.05);
+    border: 1px solid rgba(255, 255, 255, 0.09);
+    border-radius: 8px;
+    white-space: nowrap;
+}
+#videoMenu .speed-pill:hover,
+#videoMenu .aspect-pill:hover { background: rgba(255, 255, 255, 0.12); color: #fff; }
+#videoMenu .speed-pill.active,
+#videoMenu .aspect-pill.active {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: #000;
+    font-weight: 700;
+    box-shadow: 0 0 10px color-mix(in srgb, var(--accent) 45%, transparent);
+}
+
+/* Tonspur & Untertitel */
+#videoMenu .tracks-panel { width: 100%; max-width: none; max-height: none; overflow: visible; }
+#videoMenu .tracks-toggle-row { margin-bottom: 0; }
+#videoMenu .tracks-toggle-text { flex: 1 1 auto; min-width: 0; white-space: normal; }
+#videoMenu .tracks-toggle-title,
+#videoMenu .tracks-toggle-sub { white-space: normal; overflow-wrap: break-word; }
+#videoMenu .tracks-section-label { margin: 2px 2px 0; }
+#videoMenu .tracks-list { max-height: 180px; }
+#videoMenu .track-option-btn {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    width: 100%;
+    height: auto;
+    padding: 8px 10px;
+    font-size: 12px;
+    text-align: left;
+    color: var(--text-main, #eee);
+    background: rgba(255, 255, 255, 0.04);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: 8px;
+}
+#videoMenu .track-option-btn:hover:not(:disabled) { background: rgba(255, 255, 255, 0.09); }
+#videoMenu .track-option-btn.active {
+    background: color-mix(in srgb, var(--accent) 16%, transparent);
+    border-color: var(--accent);
+    color: #fff;
+}
+#videoMenu .track-option-main { flex: 1 1 auto; min-width: 0; align-items: flex-start; }
+#videoMenu .track-option-title,
+#videoMenu .track-option-sub {
+    max-width: 100%;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+#videoMenu .tracks-footer-actions { margin-top: 0; align-items: stretch; }
+
+/* ============================================================
+   PC DURCHSUCHEN – DATEIENDUNGS-FILTERLEISTE
+   ============================================================ */
+.mf-ext-filter-bar {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 6px;
+    margin-bottom: 10px;
+    padding: 6px 10px;
+    background: rgba(255, 255, 255, 0.02);
+    border: 1px solid rgba(255, 255, 255, 0.06);
+    border-radius: 8px;
+}
+
+.mf-ext-chip {
+    background: rgba(255, 255, 255, 0.05);
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    color: var(--text-muted, #bbb);
+    font-size: 11px;
+    font-weight: 600;
+    padding: 3px 9px;
+    border-radius: 999px;
+    cursor: pointer;
+    transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+    white-space: nowrap;
+}
+
+.mf-ext-chip:hover {
+    background: rgba(255, 255, 255, 0.12);
+    color: #fff;
+}
+
+.mf-ext-chip.active {
+    background: var(--accent, #1db954);
+    border-color: var(--accent, #1db954);
+    color: #000;
+    font-weight: 700;
+}
+
+.mf-custom-ext-input {
+    margin-left: auto;
+    width: 145px;
+    padding: 4px 8px;
+    border-radius: 6px;
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    background: rgba(0, 0, 0, 0.35);
+    color: #fff;
+    font-size: 11px;
+    outline: none;
+}
+
+.mf-custom-ext-input:focus {
+    border-color: var(--accent, #1db954);
+}
+
 
 
 

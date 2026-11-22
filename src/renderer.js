@@ -1875,6 +1875,7 @@ function runNextMkvConversion() {
         '-map_metadata', '0',
         '-c:v', 'copy',
         '-c:a', 'aac',
+        '-aac_coder', 'fast',
         '-b:a', '320k',
         '-ac', '2',
         '-movflags', '+faststart',
@@ -2128,6 +2129,9 @@ function loadVideos() {
             currentIndex = videoListData.indexOf(fullPath);
             videoPlayer.src = fullPath;
             videoPlayer.currentTime = 0;
+            if (typeof window.probeAndLoadVideoTracks === "function") {
+              window.probeAndLoadVideoTracks(fullPath);
+            }
             ensureAudioContext();
             videoPlayer.play();
             if (playBtn) playBtn.innerText = "⏸";
@@ -2176,6 +2180,9 @@ function loadVideos() {
 function startVideoPlayback(pathToPlay, displayName, originalPathForHistory) {
     videoPlayer.src = pathToPlay;
     videoPlayer.currentTime = 0;
+    if (typeof window.probeAndLoadVideoTracks === "function") {
+        window.probeAndLoadVideoTracks(resolveRawVideoFilePath(originalPathForHistory || pathToPlay));
+    }
     
     // Wir setzen den Titel direkt, damit "localhost" niemals oben auftaucht
     if (nowPlaying) nowPlaying.textContent = displayName;
@@ -3133,6 +3140,7 @@ if(record){
 
 const ambientCanvas = document.getElementById("videoAmbient")
 const ambientCtx = ambientCanvas ? ambientCanvas.getContext("2d") : null
+let lastAmbientDrawMs = 0;
 
 function drawAmbient(){
   requestAnimationFrame(drawAmbient)
@@ -3141,6 +3149,10 @@ function drawAmbient(){
   if(activeType !== "video") return
   if(videoPlayer.paused || videoPlayer.ended) return // CPU-Schonung, wenn das Video pausiert ist
   if(videoPlayer.readyState < 2) return
+
+  const now = performance.now();
+  if (now - lastAmbientDrawMs < 66) return;
+  lastAmbientDrawMs = now;
 
   // Feste niedrige Auflösung für extreme Performance!
   // Da CSS einen Weichzeichner (blur) anwendet, reichen 64x64px völlig aus.
@@ -3323,6 +3335,10 @@ function probeMediaDurationAsync(filePath) {
       pendingDurationProbes.delete(key);
     });
   } else {
+    if (/\.(mkv|ts|m2ts|avi|flv|wmv)$/i.test(realPath)) {
+      pendingDurationProbes.delete(key);
+      return;
+    }
     videoProbeQueue.push({ realPath, key });
     processVideoProbeQueue();
   }
@@ -11848,6 +11864,7 @@ function setupMediaThumbListeners(card, key, type) {
     const mediaPath = fromMediaKey(key);
 
     if (type === 'video') {
+        if (/\.(mkv|ts|m2ts|avi|flv|wmv)$/i.test(mediaPath)) return;
         // Hover-Video-Vorschau bei Bedarf dynamisch erzeugen (kein RAM-Overhead beim Scrollen!)
         let hoverTimeout = null;
         let previewVideo = null;
@@ -15912,6 +15929,89 @@ function toggleBlockPath(pathStr) {
   updateMfImportButtonCount();
 }
 
+let mfSelectedExts = new Set();
+let mfCustomExtQuery = "";
+
+function syncMfExtChipsUI() {
+  const chips = document.querySelectorAll("#mfExtFilterBar .mf-ext-chip");
+  const isAll = mfSelectedExts.size === 0;
+  chips.forEach((chip) => {
+    const extsAttr = chip.getAttribute("data-exts") || "";
+    if (extsAttr === "all") {
+      chip.classList.toggle("active", isAll);
+    } else {
+      const list = extsAttr.split(",").map(s => s.trim().toLowerCase()).filter(Boolean);
+      const active = list.length > 0 && list.every(ext => mfSelectedExts.has(ext));
+      chip.classList.toggle("active", active);
+    }
+  });
+}
+
+window.toggleMfExtChip = function(extsStr, btnEl) {
+  if (!extsStr || extsStr === "all") {
+    mfSelectedExts.clear();
+    syncMfExtChipsUI();
+    mfRenderLimit = 200;
+    renderMediaFinderResults();
+    return;
+  }
+
+  const list = extsStr.split(",").map(s => s.trim().toLowerCase()).filter(Boolean);
+  const allAlreadySelected = list.every(ext => mfSelectedExts.has(ext));
+  if (allAlreadySelected) {
+    list.forEach(ext => mfSelectedExts.delete(ext));
+  } else {
+    list.forEach(ext => mfSelectedExts.add(ext));
+  }
+  syncMfExtChipsUI();
+
+  const kind = btnEl ? (btnEl.getAttribute("data-kind") || "") : "";
+  let needRescan = false;
+  if (!allAlreadySelected) {
+    if (kind === "video") {
+      const cb = document.getElementById("mfFilterVideos");
+      if (cb && !cb.checked) { cb.checked = true; needRescan = true; }
+    } else if (kind === "audio") {
+      const cb = document.getElementById("mfFilterAudio");
+      if (cb && !cb.checked) { cb.checked = true; needRescan = true; }
+    } else if (kind === "image") {
+      const cb = document.getElementById("mfFilterImages");
+      if (cb && !cb.checked) { cb.checked = true; needRescan = true; }
+    }
+  }
+
+  mfRenderLimit = 200;
+  if (needRescan) {
+    restartMediaFinderScan();
+  } else {
+    renderMediaFinderResults();
+  }
+};
+
+window.onMfCustomExtInput = function(val) {
+  mfCustomExtQuery = String(val || "").trim().toLowerCase();
+  mfRenderLimit = 200;
+  renderMediaFinderResults();
+};
+
+function matchesMfExtFilter(filePath) {
+  const ext = path.extname(filePath || "").toLowerCase();
+  if (mfSelectedExts.size > 0 && !mfSelectedExts.has(ext)) {
+    return false;
+  }
+  if (mfCustomExtQuery) {
+    const tokens = mfCustomExtQuery
+      .split(/[\s,;]+/)
+      .map(t => t.trim())
+      .filter(Boolean)
+      .map(t => (t.startsWith(".") ? t : "." + t));
+    if (tokens.length > 0 && !tokens.some(tok => ext === tok || ext.startsWith(tok))) {
+      return false;
+    }
+  }
+  return true;
+}
+
 function renderMediaFinderResults() {
   const container = document.getElementById("mfResultsList");
   container.innerHTML = "";
@@ -15919,6 +16019,7 @@ function renderMediaFinderResults() {
   const query = (mfSearchQuery || "").trim().toLowerCase();
   
   const queryFiltered = foundMediaFiles.filter(file => {
+    if (!matchesMfExtFilter(file.path)) return false;
     if (!query) return true;
     return file.name.toLowerCase().includes(query) || file.path.toLowerCase().includes(query);
   });
@@ -15972,6 +16073,8 @@ function renderMediaFinderResults() {
       `;
       
       const displayTag = file.type === 'music' ? 'Musik' : (file.type === 'image' ? 'Bild' : 'Video');
+      const extUpper = path.extname(file.name).replace(/^\./, "").toUpperCase();
+      const fullBadge = extUpper ? `${displayTag} · ${extUpper}` : displayTag;
       const card = document.createElement("div");
       card.className = `mediaCard ${file.type}`;
       card.style.position = "relative";
@@ -15983,7 +16086,7 @@ function renderMediaFinderResults() {
 
       card.innerHTML = `
         ${checkboxHtml}
-        <div class="mediaBadge" style="pointer-events: none;">${displayTag}</div>
+        <div class="mediaBadge" style="pointer-events: none;">${fullBadge}</div>
         ${thumbPreviewHtml}
         <div class="mediaTitle" title="${file.name}">${file.name.replace(/\.[^/.]+$/, "")}</div>
       `;
@@ -16140,7 +16243,14 @@ function renderMediaFinderResults() {
         
         let thumbHtml = "";
         if (file.type === "video") {
-          thumbHtml = `<video class="mf-list-video-thumb" src="${toMediaKey(file.path)}" muted preload="metadata" style="width: 48px; height: 27px; object-fit: cover; border-radius: 4px; border: 1px solid rgba(255,255,255,0.1); margin-right: 4px; aspect-ratio: 16/9;"></video>`;
+          const cachedMfThumb = (typeof ThumbnailPreloader !== "undefined" && ThumbnailPreloader.hasThumb(file.path))
+            ? ThumbnailPreloader.getThumbPath(file.path)
+            : null;
+          if (cachedMfThumb && fs.existsSync(cachedMfThumb)) {
+            thumbHtml = `<img src="${pathToFileURL(cachedMfThumb).href}" loading="lazy" style="width: 48px; height: 27px; object-fit: cover; border-radius: 4px; border: 1px solid rgba(255,255,255,0.1); margin-right: 4px; aspect-ratio: 16/9;">`;
+          } else {
+            thumbHtml = `<span style="font-size: 14px; width: 48px; display: inline-flex; justify-content: center; flex-shrink: 0;">🎬</span>`;
+          }
         } else if (file.type === "image") {
           thumbHtml = `<img src="${pathToFileURL(file.path).href}" loading="lazy" style="width: 48px; height: 27px; object-fit: cover; border-radius: 4px; border: 1px solid rgba(255,255,255,0.1); margin-right: 4px; aspect-ratio: 16/9;">`;
         } else {
@@ -16154,18 +16264,6 @@ function renderMediaFinderResults() {
           </div>
           <input type="checkbox" class="mf-file-checkbox" data-path="${file.path}" data-type="${file.type}" style="cursor: pointer; accent-color: var(--accent); flex-shrink: 0;" ${isFileChecked ? 'checked' : ''} ${isBlocked ? 'disabled' : ''} onchange="onMfCheckboxChange('${file.path.replace(/\\/g, '\\\\')}', this.checked)">
         `;
-        
-        if (file.type === "video") {
-          const v = label.querySelector(".mf-list-video-thumb");
-          if (v) {
-            v.addEventListener("loadedmetadata", () => {
-              v.currentTime = v.duration * 0.15;
-            });
-            v.addEventListener("seeked", () => {
-              v.pause();
-            });
-          }
-        }
         
         filesContainer.appendChild(label);
       });
@@ -16489,8 +16587,9 @@ function initScrubberHoverPreview() {
     badge.classList.remove("hidden");
     if (timeEl) timeEl.innerText = formatTime(hoverTime);
 
-    // If video is active and has source, render preview snapshot to canvas
-    if (activeType === "video" && videoPlayer && videoPlayer.src && canvasEl) {
+    // If video is active and has source, render preview snapshot to canvas (skip heavy MKV/TS/AVI seeks)
+    const rawPreviewPath = (videoPlayer && videoPlayer.src) ? resolveRawVideoFilePath(videoPlayer.src) : "";
+    if (activeType === "video" && videoPlayer && videoPlayer.src && canvasEl && !/\.(mkv|ts|m2ts|avi|flv|wmv)$/i.test(rawPreviewPath)) {
       canvasEl.classList.remove("hidden");
       if (!previewVideo) {
         previewVideo = document.createElement("video");
@@ -17082,6 +17181,15 @@ window.showTracksPanel = function() {
   if (adj) adj.classList.add("hidden");
   if (eq) eq.classList.add("hidden");
   if (tracks) tracks.classList.remove("hidden");
+
+  const currentRaw = resolveRawVideoFilePath(videoPlayer?.currentSrc || videoPlayer?.src || "");
+  if (!videoTrackState.isProbing && currentRaw && !/^https?:\/\//i.test(currentRaw)) {
+    if (videoTrackState.audioTracks.length === 0 || currentRaw !== videoTrackState.mediaPath) {
+      if (typeof window.probeAndLoadVideoTracks === "function") {
+        window.probeAndLoadVideoTracks(currentRaw);
+      }
+    }
+  }
   renderTracksUI();
 };
 
@@ -17237,7 +17345,11 @@ window.probeAndLoadVideoTracks = async function(explicitPath) {
     return;
   }
   const mediaKey = getMediaStemPrefKey(rawPath);
-  if (videoTrackState.mediaPath === rawPath && videoTrackState.isProbing) {
+  if (
+    videoTrackState.mediaPath === rawPath &&
+    videoTrackState.isProbing &&
+    Date.now() - (videoTrackState.probeStartedAt || 0) < 4000
+  ) {
     return;
   }
 
@@ -17245,6 +17357,7 @@ window.probeAndLoadVideoTracks = async function(explicitPath) {
   videoTrackState.mediaPath = rawPath;
   videoTrackState.mediaKey = mediaKey;
   videoTrackState.isProbing = true;
+  videoTrackState.probeStartedAt = Date.now();
   const myToken = ++videoTrackState.probeToken;
 
   if (isNewVideo) {
@@ -17358,6 +17471,10 @@ if (typeof videoAltAudio !== "undefined" && videoAltAudio) {
 }
 
 if (videoPlayer) {
+  let lastAltAudioDriftFixMs = 0;
+  videoPlayer.addEventListener("loadstart", () => {
+    window.probeAndLoadVideoTracks();
+  });
   videoPlayer.addEventListener("loadedmetadata", () => {
     window.probeAndLoadVideoTracks();
   });
@@ -17417,8 +17534,10 @@ if (videoPlayer) {
   });
   videoPlayer.addEventListener("timeupdate", () => {
     if (!isAltAudioActive() || videoPlayer.seeking) return;
+    const now = Date.now();
     const drift = Math.abs((videoAltAudio.currentTime || 0) - (videoPlayer.currentTime || 0));
-    if (drift > 0.18) {
+    if (drift > 0.40 && now - lastAltAudioDriftFixMs > 1500) {
+      lastAltAudioDriftFixMs = now;
       try { videoAltAudio.currentTime = videoPlayer.currentTime || 0; } catch (e) {}
     }
     if (!videoPlayer.paused && videoAltAudio.paused && videoAltAudio.readyState >= 2) {

@@ -3953,7 +3953,7 @@ My View
             </div>
 
             <!-- Options Row (Media Types, Deduplication, Games filter) -->
-            <div style="margin-bottom: 12px; display: flex; gap: 16px; flex-wrap: wrap; align-items: center; padding: 6px 10px; background: rgba(255,255,255,0.01); border-radius: 6px; border: 1px solid rgba(255,255,255,0.03); font-size: 11px; color: var(--text-muted);">
+            <div style="margin-bottom: 8px; display: flex; gap: 16px; flex-wrap: wrap; align-items: center; padding: 6px 10px; background: rgba(255,255,255,0.01); border-radius: 6px; border: 1px solid rgba(255,255,255,0.03); font-size: 11px; color: var(--text-muted);">
                 <label style="display: flex; align-items: center; gap: 5px; cursor: pointer; color: #fff; font-weight: 600;">
                     <input type="checkbox" id="mfFilterVideos" checked onchange="restartMediaFinderScan()" style="cursor: pointer; accent-color: var(--accent);">
                     🎬 Videos
@@ -3975,6 +3975,29 @@ My View
                     <input type="checkbox" id="mfOptFilterGames" checked onchange="restartMediaFinderScan()" style="cursor: pointer; accent-color: var(--accent);">
                     System- &amp; Spieldateien ausblenden
                 </label>
+            </div>
+
+            <!-- File Type Extension Filter Bar -->
+            <div id="mfExtFilterBar" class="mf-ext-filter-bar">
+                <button type="button" class="mf-ext-chip active" data-exts="all" data-kind="all" onclick="toggleMfExtChip('all', this)">Alle Formate</button>
+                <button type="button" class="mf-ext-chip" data-exts=".mkv" data-kind="video" onclick="toggleMfExtChip('.mkv', this)">MKV</button>
+                <button type="button" class="mf-ext-chip" data-exts=".mp4,.m4v" data-kind="video" onclick="toggleMfExtChip('.mp4,.m4v', this)">MP4</button>
+                <button type="button" class="mf-ext-chip" data-exts=".webm" data-kind="video" onclick="toggleMfExtChip('.webm', this)">WEBM</button>
+                <button type="button" class="mf-ext-chip" data-exts=".avi" data-kind="video" onclick="toggleMfExtChip('.avi', this)">AVI</button>
+                <button type="button" class="mf-ext-chip" data-exts=".mov" data-kind="video" onclick="toggleMfExtChip('.mov', this)">MOV</button>
+                <button type="button" class="mf-ext-chip" data-exts=".ts,.m2ts" data-kind="video" onclick="toggleMfExtChip('.ts,.m2ts', this)">TS / M2TS</button>
+                <button type="button" class="mf-ext-chip" data-exts=".mp3" data-kind="audio" onclick="toggleMfExtChip('.mp3', this)">MP3</button>
+                <button type="button" class="mf-ext-chip" data-exts=".flac" data-kind="audio" onclick="toggleMfExtChip('.flac', this)">FLAC</button>
+                <button type="button" class="mf-ext-chip" data-exts=".wav" data-kind="audio" onclick="toggleMfExtChip('.wav', this)">WAV</button>
+                <button type="button" class="mf-ext-chip" data-exts=".ogg" data-kind="audio" onclick="toggleMfExtChip('.ogg', this)">OGG</button>
+                <button type="button" class="mf-ext-chip" data-exts=".m4a,.aac" data-kind="audio" onclick="toggleMfExtChip('.m4a,.aac', this)">M4A / AAC</button>
+                <button type="button" class="mf-ext-chip" data-exts=".dts,.dtshd" data-kind="audio" onclick="toggleMfExtChip('.dts,.dtshd', this)">DTS</button>
+                <button type="button" class="mf-ext-chip" data-exts=".ac3,.eac3" data-kind="audio" onclick="toggleMfExtChip('.ac3,.eac3', this)">AC3</button>
+                <button type="button" class="mf-ext-chip" data-exts=".png" data-kind="image" onclick="toggleMfExtChip('.png', this)">PNG</button>
+                <button type="button" class="mf-ext-chip" data-exts=".jpg,.jpeg" data-kind="image" onclick="toggleMfExtChip('.jpg,.jpeg', this)">JPG</button>
+                <button type="button" class="mf-ext-chip" data-exts=".webp" data-kind="image" onclick="toggleMfExtChip('.webp', this)">WEBP</button>
+                <button type="button" class="mf-ext-chip" data-exts=".gif" data-kind="image" onclick="toggleMfExtChip('.gif', this)">GIF</button>
+                <input type="text" id="mfCustomExtInput" class="mf-custom-ext-input" placeholder="Endung (z.B. .mkv)" oninput="onMfCustomExtInput(this.value)">
             </div>
 
             <!-- Sub-Tabs Row (Alle Dateien vs. Ordner-Ansicht) -->

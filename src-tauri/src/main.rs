@@ -200,6 +200,7 @@ static MKV_REMUX_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 static AUDIO_EXTRACT_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 static SUB_EXTRACT_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 static PLAYABLE_PATH_CACHE: OnceLock<Mutex<HashMap<String, PathBuf>>> = OnceLock::new();
+static PROBE_TRACKS_CACHE: OnceLock<Mutex<HashMap<String, ProbedTracks>>> = OnceLock::new();
 
 fn fnv1a_64(data: &[u8]) -> u64 {
     let mut hash: u64 = 0xcbf29ce484222325;
@@ -247,6 +248,60 @@ fn saved_subs_dir_for_media(media_dir: &Path, media_path: &Path) -> PathBuf {
         .join(format!("saved_{:016x}", hash))
 }
 
+fn find_companion_mkv_for_mp4(mp4_path: &Path) -> Option<PathBuf> {
+    let mkv_twin = mp4_path.with_extension("mkv");
+    if mkv_twin.is_file() {
+        return Some(mkv_twin);
+    }
+    let target_name = mp4_path.file_stem()?.to_string_lossy().to_lowercase();
+    let target_mkv = format!("{}.mkv", target_name);
+
+    let mut search_roots: Vec<PathBuf> = Vec::new();
+    if let Some(root) = mp4_path.components().next() {
+        let root_path = PathBuf::from(root.as_os_str());
+        search_roots.push(root_path.join("Downloader").join("Downloads"));
+        search_roots.push(root_path.join("Downloads"));
+    }
+    if let Ok(profile) = std::env::var("USERPROFILE") {
+        search_roots.push(PathBuf::from(profile).join("Downloads"));
+    }
+    let e_dl = PathBuf::from("E:\\Downloader\\Downloads");
+    if !search_roots
+        .iter()
+        .any(|p| p.to_string_lossy().eq_ignore_ascii_case("E:\\Downloader\\Downloads"))
+    {
+        search_roots.push(e_dl);
+    }
+
+    for root in search_roots {
+        if !root.is_dir() {
+            continue;
+        }
+        if let Ok(entries) = fs::read_dir(&root) {
+            for entry in entries.flatten() {
+                let p = entry.path();
+                if p.is_file() {
+                    if entry.file_name().to_string_lossy().to_lowercase() == target_mkv {
+                        return Some(p);
+                    }
+                } else if p.is_dir() {
+                    if let Ok(sub_entries) = fs::read_dir(&p) {
+                        for sub in sub_entries.flatten() {
+                            let sp = sub.path();
+                            if sp.is_file()
+                                && sub.file_name().to_string_lossy().to_lowercase() == target_mkv
+                            {
+                                return Some(sp);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
 fn resolve_track_source_paths(raw_path: &str) -> (Option<PathBuf>, Option<PathBuf>) {
     let orig = PathBuf::from(raw_path);
     let ext_lower = orig
@@ -256,12 +311,7 @@ fn resolve_track_source_paths(raw_path: &str) -> (Option<PathBuf>, Option<PathBu
         .to_lowercase();
     if orig.is_file() {
         let companion = if ext_lower == "mp4" || ext_lower == "m4v" {
-            let mkv_twin = orig.with_extension("mkv");
-            if mkv_twin.is_file() {
-                Some(mkv_twin)
-            } else {
-                None
-            }
+            find_companion_mkv_for_mp4(&orig)
         } else {
             None
         };
@@ -425,12 +475,32 @@ fn extract_audio_channels(details: &str) -> String {
     String::new()
 }
 
+#[derive(Clone)]
 struct ProbedTracks {
+    video_codec: String,
     audio: Vec<Value>,
     subtitles: Vec<Value>,
 }
 
 fn probe_media_tracks(media_path: &Path, media_dir: &Path) -> ProbedTracks {
+    let cache_key = fs::metadata(media_path).ok().map(|m| {
+        let mtime_ms = m
+            .modified()
+            .ok()
+            .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        format!("{}|{}|{}", normalize_path_key(media_path), m.len(), mtime_ms)
+    });
+    if let Some(ref k) = cache_key {
+        let cache = PROBE_TRACKS_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+        if let Ok(map) = cache.lock() {
+            if let Some(hit) = map.get(k) {
+                return hit.clone();
+            }
+        }
+    }
+
     struct RawAudioEntry {
         index: usize,
         lang: String,
@@ -441,11 +511,13 @@ fn probe_media_tracks(media_path: &Path, media_dir: &Path) -> ProbedTracks {
         is_default: bool,
         is_forced: bool,
     }
+    let mut video_codec = String::new();
     let mut audio_entries: Vec<RawAudioEntry> = Vec::new();
     let mut sub_entries: Vec<(usize, String, String, String, bool, bool, bool)> = Vec::new();
 
     let Some(ffmpeg) = find_ffmpeg(media_dir) else {
         return ProbedTracks {
+            video_codec,
             audio: Vec::new(),
             subtitles: Vec::new(),
         };
@@ -458,6 +530,7 @@ fn probe_media_tracks(media_path: &Path, media_dir: &Path) -> ProbedTracks {
 
     let Ok(output) = cmd.output() else {
         return ProbedTracks {
+            video_codec,
             audio: Vec::new(),
             subtitles: Vec::new(),
         };
@@ -508,6 +581,12 @@ fn probe_media_tracks(media_path: &Path, media_dir: &Path) -> ProbedTracks {
                 let is_forced = lower.contains("(forced)");
                 sub_entries.push((idx, lang, codec, String::new(), is_default, is_forced, is_text));
                 current = ActiveStream::Subtitle(idx);
+            } else if let Some(pos) = trimmed.find(": Video:") {
+                if video_codec.is_empty() && !trimmed.to_lowercase().contains("(attached pic)") {
+                    let details = trimmed[pos + ": Video:".len()..].trim();
+                    video_codec = extract_stream_codec(details);
+                }
+                current = ActiveStream::None;
             } else {
                 current = ActiveStream::None;
             }
@@ -587,7 +666,18 @@ fn probe_media_tracks(media_path: &Path, media_dir: &Path) -> ProbedTracks {
         })
         .collect();
 
-    ProbedTracks { audio, subtitles }
+    let probed = ProbedTracks {
+        video_codec,
+        audio,
+        subtitles,
+    };
+    if let Some(ref k) = cache_key {
+        let cache = PROBE_TRACKS_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+        if let Ok(mut map) = cache.lock() {
+            map.insert(k.clone(), probed.clone());
+        }
+    }
+    probed
 }
 
 fn file_hash_key(path: &Path, extra: &str) -> u64 {
@@ -609,26 +699,32 @@ fn store_playable_path_cache(cache_key: &str, resolved: &Path) {
     }
 }
 
-fn run_ffmpeg_video_remux(ffmpeg: &Path, src: &Path, tmp_mp4: &Path, transcode_video: bool) -> bool {
+fn run_ffmpeg_video_remux(
+    ffmpeg: &Path,
+    src: &Path,
+    tmp_mp4: &Path,
+    transcode_video: bool,
+    is_hevc: bool,
+    copy_audio: bool,
+) -> bool {
     let _ = fs::remove_file(tmp_mp4);
     let src_str = src.to_string_lossy().to_string();
     let out_str = tmp_mp4.to_string_lossy().to_string();
 
-    let mut args: Vec<&str> = vec![
-        "-nostdin",
-        "-err_detect",
-        "ignore_err",
-        "-fflags",
-        "+genpts",
+    let mut args: Vec<&str> = vec!["-nostdin", "-err_detect", "ignore_err"];
+    if transcode_video {
+        args.extend(["-fflags", "+genpts"]);
+    }
+    args.extend([
         "-i",
         &src_str,
         "-map",
         "0:v:0",
         "-map",
-        "0:a?",
+        "0:a:0?",
         "-map_metadata",
         "0",
-    ];
+    ]);
     if transcode_video {
         args.extend([
             "-c:v",
@@ -642,19 +738,25 @@ fn run_ffmpeg_video_remux(ffmpeg: &Path, src: &Path, tmp_mp4: &Path, transcode_v
         ]);
     } else {
         args.extend(["-c:v", "copy"]);
+        if is_hevc {
+            args.extend(["-tag:v", "hvc1", "-strict", "unofficial"]);
+        }
     }
-    args.extend([
-        "-c:a",
-        "aac",
-        "-b:a",
-        "320k",
-        "-ac",
-        "2",
-        "-movflags",
-        "+faststart",
-        "-y",
-        &out_str,
-    ]);
+    if copy_audio {
+        args.extend(["-c:a", "copy"]);
+    } else {
+        args.extend([
+            "-c:a",
+            "aac",
+            "-aac_coder",
+            "fast",
+            "-b:a",
+            "256k",
+            "-ac",
+            "2",
+        ]);
+    }
+    args.extend(["-movflags", "+faststart", "-y", &out_str]);
 
     let mut cmd = Command::new(ffmpeg);
     cmd.args(&args);
@@ -772,6 +874,8 @@ fn resolve_playable_media_path(path: &Path) -> PathBuf {
                 "-dn",
                 "-c:a",
                 "aac",
+                "-aac_coder",
+                "fast",
                 "-b:a",
                 "320k",
                 "-ac",
@@ -802,24 +906,26 @@ fn resolve_playable_media_path(path: &Path) -> PathBuf {
         return path.to_path_buf();
     }
 
-    if is_probe_video {
-        let probed = probe_media_tracks(path, &media_dir);
-        let track0_codec = probed
-            .audio
-            .first()
-            .and_then(|t| t.get("codec"))
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
-        if !is_non_browser_audio_codec(track0_codec) {
-            store_playable_path_cache(&cache_key, path);
-            return path.to_path_buf();
-        }
+    let probed = probe_media_tracks(path, &media_dir);
+    let track0_codec = probed
+        .audio
+        .first()
+        .and_then(|t| t.get("codec"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+
+    if is_probe_video && !is_non_browser_audio_codec(track0_codec) {
+        store_playable_path_cache(&cache_key, path);
+        return path.to_path_buf();
     }
 
+    let is_hevc = probed.video_codec == "hevc" || probed.video_codec == "h265";
+    let copy_audio = matches!(track0_codec, "aac" | "mp3") || probed.audio.is_empty();
+
     let cache_mp4 = if is_probe_video {
-        cache_dir.join(format!("remux_{:016x}.mp4", hash))
+        cache_dir.join(format!("v3_remux_{:016x}.mp4", hash))
     } else {
-        cache_dir.join(format!("{:016x}.mp4", hash))
+        cache_dir.join(format!("v3_{:016x}.mp4", hash))
     };
 
     if cache_mp4.is_file()
@@ -846,13 +952,15 @@ fn resolve_playable_media_path(path: &Path) -> PathBuf {
     if let Some(ffmpeg) = find_ffmpeg(&media_dir) {
         let _ = fs::create_dir_all(&cache_dir);
         let tmp_mp4 = if is_probe_video {
-            cache_dir.join(format!("remux_{:016x}.tmp.mp4", hash))
+            cache_dir.join(format!("v3_remux_{:016x}.tmp.mp4", hash))
         } else {
-            cache_dir.join(format!("{:016x}.tmp.mp4", hash))
+            cache_dir.join(format!("v3_{:016x}.tmp.mp4", hash))
         };
 
-        let ok = run_ffmpeg_video_remux(&ffmpeg, path, &tmp_mp4, false)
-            || run_ffmpeg_video_remux(&ffmpeg, path, &tmp_mp4, true);
+        let ok = run_ffmpeg_video_remux(&ffmpeg, path, &tmp_mp4, false, is_hevc, copy_audio)
+            || (copy_audio
+                && run_ffmpeg_video_remux(&ffmpeg, path, &tmp_mp4, false, is_hevc, false))
+            || run_ffmpeg_video_remux(&ffmpeg, path, &tmp_mp4, true, false, false);
 
         if ok && fs::rename(&tmp_mp4, &cache_mp4).is_ok() && cache_mp4.is_file() {
             store_playable_path_cache(&cache_key, &cache_mp4);
@@ -890,59 +998,52 @@ fn serve_file_with_ranges(req: Request, path: &Path) {
 
     if let Some(range_val) = range_header {
         if let Some(spec) = range_val.strip_prefix("bytes=") {
-            let mut parts = spec.splitn(2, '-');
-            let start = parts.next().unwrap_or("").trim().parse::<u64>().unwrap_or(0);
-            let max_chunk: u64 = 4 * 1024 * 1024;
-            let requested_end = parts
-                .next()
-                .unwrap_or("")
-                .trim()
-                .parse::<u64>()
-                .ok();
+            if total_len > 0 {
+                let mut parts = spec.splitn(2, '-');
+                let start = parts.next().unwrap_or("").trim().parse::<u64>().unwrap_or(0);
+                let requested_end = parts
+                    .next()
+                    .unwrap_or("")
+                    .trim()
+                    .parse::<u64>()
+                    .ok();
 
-            if start >= total_len && total_len > 0 {
-                let mut resp = Response::empty(416)
-                    .with_header(Header::from_bytes("Content-Range", format!("bytes */{}", total_len)).unwrap());
-                for h in cors_headers() {
-                    resp.add_header(h);
-                }
-                let _ = req.respond(resp);
-                return;
-            }
-
-            let end = match requested_end {
-                Some(e) => e.min(total_len.saturating_sub(1)).min(start + max_chunk - 1),
-                None => total_len.saturating_sub(1).min(start + max_chunk - 1),
-            };
-            let len = end.saturating_sub(start) + 1;
-            let mut buf = vec![0u8; len as usize];
-            if file.seek(SeekFrom::Start(start)).is_ok() {
-                let mut read_total = 0usize;
-                while read_total < buf.len() {
-                    match file.read(&mut buf[read_total..]) {
-                        Ok(0) => break,
-                        Ok(n) => read_total += n,
-                        Err(_) => break,
+                if start >= total_len {
+                    let mut resp = Response::empty(416)
+                        .with_header(Header::from_bytes("Content-Range", format!("bytes */{}", total_len)).unwrap());
+                    for h in cors_headers() {
+                        resp.add_header(h);
                     }
+                    let _ = req.respond(resp);
+                    return;
                 }
-                buf.truncate(read_total);
-                let actual_end = start + (read_total as u64).saturating_sub(1);
-                let mut resp = Response::from_data(buf)
-                    .with_status_code(StatusCode(206))
-                    .with_header(Header::from_bytes("Content-Type", mime).unwrap())
-                    .with_header(Header::from_bytes("Accept-Ranges", "bytes").unwrap())
-                    .with_header(
+
+                let end = match requested_end {
+                    Some(e) => e.min(total_len.saturating_sub(1)).max(start),
+                    None => total_len.saturating_sub(1),
+                };
+                let len = end.saturating_sub(start) + 1;
+                if file.seek(SeekFrom::Start(start)).is_ok() {
+                    let mut headers = vec![
+                        Header::from_bytes("Content-Type", mime).unwrap(),
+                        Header::from_bytes("Accept-Ranges", "bytes").unwrap(),
                         Header::from_bytes(
                             "Content-Range",
-                            format!("bytes {}-{}/{}", start, actual_end, total_len),
+                            format!("bytes {}-{}/{}", start, end, total_len),
                         )
                         .unwrap(),
+                    ];
+                    headers.extend(cors_headers());
+                    let resp = Response::new(
+                        StatusCode(206),
+                        headers,
+                        file.take(len),
+                        Some(len as usize),
+                        None,
                     );
-                for h in cors_headers() {
-                    resp.add_header(h);
+                    let _ = req.respond(resp);
+                    return;
                 }
-                let _ = req.respond(resp);
-                return;
             }
         }
     }
@@ -1046,41 +1147,63 @@ fn handle_media_audio_stream(req: Request, url: &str) {
     let _ = fs::remove_file(&tmp_m4a);
 
     let map_arg = format!("0:a:{}", track);
-    let mut cmd = Command::new(&ffmpeg);
-    cmd.args([
-        "-nostdin",
-        "-err_detect",
-        "ignore_err",
-        "-fflags",
-        "+genpts",
-        "-i",
-        &audio_src.to_string_lossy(),
-        "-vn",
-        "-sn",
-        "-dn",
-        "-map",
-        &map_arg,
-        "-c:a",
-        "aac",
-        "-b:a",
-        "320k",
-        "-ac",
-        "2",
-        "-movflags",
-        "+faststart",
-        "-y",
-        &tmp_m4a.to_string_lossy(),
-    ]);
-    #[cfg(target_os = "windows")]
-    cmd.creation_flags(CREATE_NO_WINDOW);
+    let audio_probed = probe_media_tracks(&audio_src, &media_dir);
+    let track_codec = audio_probed
+        .audio
+        .get(track)
+        .and_then(|t| t.get("codec"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let can_copy = track_codec == "aac";
 
-    if let Ok(output) = cmd.output() {
-        if output.status.success() && fs::metadata(&tmp_m4a).map(|m| m.len() > 128).unwrap_or(false) {
-            if fs::rename(&tmp_m4a, &cache_m4a).is_ok() && cache_m4a.is_file() {
-                serve_file_with_ranges(req, &cache_m4a);
-                return;
-            }
+    let run_extract = |copy_only: bool| -> bool {
+        let _ = fs::remove_file(&tmp_m4a);
+        let src_str = audio_src.to_string_lossy().to_string();
+        let out_str = tmp_m4a.to_string_lossy().to_string();
+        let mut args: Vec<&str> = Vec::new();
+        args.extend(["-nostdin", "-err_detect", "ignore_err"]);
+        if !copy_only {
+            args.extend(["-fflags", "+genpts"]);
         }
+        args.extend([
+            "-i",
+            &src_str,
+            "-vn",
+            "-sn",
+            "-dn",
+            "-map",
+            &map_arg,
+        ]);
+        if copy_only {
+            args.extend(["-c:a", "copy"]);
+        } else {
+            args.extend([
+                "-c:a",
+                "aac",
+                "-aac_coder",
+                "fast",
+                "-b:a",
+                "320k",
+                "-ac",
+                "2",
+            ]);
+        }
+        args.extend(["-movflags", "+faststart", "-y", &out_str]);
+        let mut cmd = Command::new(&ffmpeg);
+        cmd.args(&args);
+        #[cfg(target_os = "windows")]
+        cmd.creation_flags(CREATE_NO_WINDOW);
+        cmd.output()
+            .map(|o| {
+                o.status.success() && fs::metadata(&tmp_m4a).map(|m| m.len() > 128).unwrap_or(false)
+            })
+            .unwrap_or(false)
+    };
+
+    let ok = (can_copy && run_extract(true)) || run_extract(false);
+    if ok && fs::rename(&tmp_m4a, &cache_m4a).is_ok() && cache_m4a.is_file() {
+        serve_file_with_ranges(req, &cache_m4a);
+        return;
     }
     let _ = fs::remove_file(&tmp_m4a);
     respond_json(req, 500, json!({ "error": "Audio track extraction failed" }));
@@ -1209,13 +1332,43 @@ fn handle_media_tracks_api(req: Request, body: Value) {
         }
     }
 
+    let saved_dir = saved_subs_dir_for_media(&media_dir, Path::new(raw_path));
     if probed.subtitles.is_empty() {
-        let saved_dir = saved_subs_dir_for_media(&media_dir, Path::new(raw_path));
         let manifest_path = saved_dir.join("manifest.json");
         if let Ok(txt) = fs::read_to_string(&manifest_path) {
             if let Ok(Value::Array(arr)) = serde_json::from_str::<Value>(&txt) {
                 if !arr.is_empty() {
                     probed.subtitles = arr;
+                }
+            }
+        }
+    }
+
+    let audio_meta_path = saved_dir.join("audio_tracks.json");
+    if let Ok(txt) = fs::read_to_string(&audio_meta_path) {
+        if let Ok(Value::Array(saved_audio)) = serde_json::from_str::<Value>(&txt) {
+            if saved_audio.len() == probed.audio.len() {
+                for (dst, src) in probed.audio.iter_mut().zip(saved_audio.iter()) {
+                    if let (Some(dst_obj), Some(src_obj)) = (dst.as_object_mut(), src.as_object()) {
+                        let dst_title = dst_obj.get("title").and_then(|v| v.as_str()).unwrap_or("");
+                        if dst_title.is_empty() {
+                            if let Some(src_title) = src_obj.get("title").and_then(|v| v.as_str()).filter(|s| !s.is_empty()) {
+                                dst_obj.insert("title".to_string(), json!(src_title));
+                            }
+                        }
+                        let dst_cd = dst_obj.get("codecDisplay").and_then(|v| v.as_str()).unwrap_or("");
+                        if dst_cd.is_empty() {
+                            if let Some(src_cd) = src_obj.get("codecDisplay").and_then(|v| v.as_str()).filter(|s| !s.is_empty()) {
+                                dst_obj.insert("codecDisplay".to_string(), json!(src_cd));
+                            }
+                        }
+                        let dst_ch = dst_obj.get("channels").and_then(|v| v.as_str()).unwrap_or("");
+                        if dst_ch.is_empty() {
+                            if let Some(src_ch) = src_obj.get("channels").and_then(|v| v.as_str()).filter(|s| !s.is_empty()) {
+                                dst_obj.insert("channels".to_string(), json!(src_ch));
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -1265,6 +1418,12 @@ fn handle_extract_subtitles_api(req: Request, body: Value) {
     let lock = SUB_EXTRACT_LOCK.get_or_init(|| Mutex::new(()));
     let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
     let _ = fs::create_dir_all(&saved_dir);
+
+    if !probed.audio.is_empty() {
+        if let Ok(audio_json) = serde_json::to_string_pretty(&probed.audio) {
+            let _ = fs::write(saved_dir.join("audio_tracks.json"), audio_json);
+        }
+    }
 
     let mut manifest_entries: Vec<Value> = Vec::new();
     for item in probed.subtitles {
