@@ -2240,6 +2240,35 @@ My View
                     </div>
                 </div>
 
+                <!-- 2b. SYSTEM- & FUNKTIONS-DIAGNOSE CARD -->
+                <div id="updateSystemCheckCard" class="help-section-card" style="padding: 20px;">
+                    <div style="display: flex; justify-content: space-between; align-items: flex-start; flex-wrap: wrap; gap: 12px; margin-bottom: 14px;">
+                        <div>
+                            <div style="display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 4px;">
+                                <h3 style="margin: 0; font-size: 15px;">🩺 System- &amp; Funktions-Diagnose</h3>
+                                <span id="sysCheckSummaryBadge" class="sys-check-badge">Wird geprüft…</span>
+                            </div>
+                            <div style="font-size: 12px; color: var(--text-muted); line-height: 1.4;">
+                                Prüft, ob alle Komponenten (FFmpeg, Tonspur-Wechsel, DTS/AC3, MKV-Untertitel, Ordner-Rechte, Equalizer &amp; Updater) sauber funktionieren.
+                            </div>
+                        </div>
+                        <div style="display: flex; gap: 8px; flex-wrap: wrap; align-items: center;">
+                            <button id="btnRunSysCheck" class="modalBtn" onclick="runAppSystemCheck(false)" style="background: #2a2a2a; padding: 7px 12px; font-size: 12px;">
+                                🔍 Jetzt prüfen
+                            </button>
+                            <button id="btnRepairSysCheck" class="modalBtn primary" onclick="runAppSystemRepair()" style="padding: 7px 12px; font-size: 12px;">
+                                🔧 Automatisch reparieren
+                            </button>
+                            <button id="btnPickFfmpegFile" class="modalBtn hidden" onclick="pickAndInstallFfmpeg()" style="background: #332211; border: 1px solid rgba(251, 191, 36, 0.45); color: #fde68a; padding: 7px 12px; font-size: 12px;">
+                                📁 ffmpeg.exe auswählen
+                            </button>
+                        </div>
+                    </div>
+
+                    <div id="sysCheckItemsGrid" class="sys-check-grid"></div>
+                    <div id="sysCheckRuntimeMeta" style="font-size: 11px; color: var(--text-muted); margin-top: 10px; line-height: 1.5;"></div>
+                </div>
+
                 <!-- 3. CONFIG & LOKALE DATEI CARD -->
                 <div class="help-section-card" style="padding: 20px;">
                     <h3 style="margin: 0 0 14px 0; font-size: 15px;">⚙️ Updater-Einstellungen</h3>

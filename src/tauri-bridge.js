@@ -915,6 +915,15 @@
       if (channel === "pick-local-update-file") {
         return rpcAsync("/api/dialog", { kind: "openAsar" });
       }
+      if (channel === "pick-ffmpeg-file") {
+        return rpcAsync("/api/dialog", { kind: "openFfmpeg" });
+      }
+      if (channel === "run-system-check") {
+        return rpcAsync("/api/system-check", args[0] || {});
+      }
+      if (channel === "run-system-repair") {
+        return rpcAsync("/api/system-repair", args[0] || {});
+      }
       if (channel === "apply-app-update") {
         return rpcAsync("/api/updater", { action: "apply", ...(args[0] || {}) });
       }

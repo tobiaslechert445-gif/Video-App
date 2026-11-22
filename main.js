@@ -1,7 +1,8 @@
 const { app, BrowserWindow, ipcMain, globalShortcut, Tray, Menu, session, dialog } = require("electron")
 const path = require("path")
 const fs = require("fs")
-const { spawn } = require("child_process")
+const os = require("os")
+const { spawn, spawnSync } = require("child_process")
 const { pipeline } = require("stream/promises")
 const { Readable, Transform } = require("stream")
 
@@ -12,14 +13,1084 @@ let tray = null
 let streamBridgeServer = null
 const STREAM_BRIDGE_PORT = 45678
 
-// Local HTTP Bridge Server for Twitch and YouTube live playback
+let cachedFfmpegPath = null
+const probeTracksCache = new Map()
+const inFlightMediaJobs = new Map()
+
+function getBridgePaths() {
+  const isPackaged = Boolean(app && app.isPackaged)
+  const appDir = isPackaged ? path.dirname(process.execPath) : __dirname
+  const mediaDir = path.join(appDir, "media")
+  return { isPackaged, appDir, mediaDir }
+}
+
+function clearFfmpegAndProbeCaches() {
+  cachedFfmpegPath = null
+  probeTracksCache.clear()
+}
+
+function fnv1a64Hex(str) {
+  let hash = 0xcbf29ce484222325n
+  const prime = 0x100000001b3n
+  const mask = 0xffffffffffffffffn
+  const buf = Buffer.from(String(str || ""), "utf8")
+  for (let i = 0; i < buf.length; i++) {
+    hash ^= BigInt(buf[i])
+    hash = (hash * prime) & mask
+  }
+  return hash.toString(16).padStart(16, "0")
+}
+
+function normalizePathKey(p) {
+  return String(p || "").replace(/\//g, "\\").trim().toLowerCase()
+}
+
+function savedSubsDirForMedia(mediaDir, rawPath) {
+  const parsed = path.parse(String(rawPath || ""))
+  const parent = normalizePathKey(parsed.dir)
+  const stem = String(parsed.name || "").toLowerCase()
+  const hash = fnv1a64Hex(`${parent}|${stem}`)
+  return path.join(mediaDir, ".sub_cache", `saved_${hash}`)
+}
+
+function fileHashHex(filePath, extra = "") {
+  let size = 0
+  let mtimeMs = 0
+  try {
+    const st = fs.statSync(filePath)
+    size = st.size
+    mtimeMs = Math.floor(st.mtimeMs)
+  } catch (e) {}
+  return fnv1a64Hex(`${normalizePathKey(filePath)}|${size}|${mtimeMs}|${extra}`)
+}
+
+function findFfmpeg(mediaDir) {
+  if (cachedFfmpegPath && fs.existsSync(cachedFfmpegPath)) {
+    return cachedFfmpegPath
+  }
+  const candidates = [
+    path.join(mediaDir, "video", "ffmpeg.exe"),
+    path.join(mediaDir, "ffmpeg.exe")
+  ]
+  const exeDir = path.dirname(process.execPath)
+  candidates.push(path.join(exeDir, "ffmpeg.exe"))
+  candidates.push(path.join(exeDir, "media", "video", "ffmpeg.exe"))
+
+  for (const seed of [exeDir, mediaDir]) {
+    let cur = seed
+    for (let i = 0; i < 4 && cur; i++) {
+      candidates.push(path.join(cur, "media", "video", "ffmpeg.exe"))
+      candidates.push(path.join(cur, "ffmpeg.exe"))
+      candidates.push(path.join(cur, "My_View_Starter_Template", "media", "video", "ffmpeg.exe"))
+      const parent = path.dirname(cur)
+      if (parent === cur) break
+      cur = parent
+    }
+  }
+
+  const home = os.homedir()
+  if (home) {
+    for (const sub of ["Downloads", "Desktop", "Documents"]) {
+      const base = path.join(home, sub)
+      candidates.push(path.join(base, "ffmpeg.exe"))
+      candidates.push(path.join(base, "My_View_Starter_Template", "media", "video", "ffmpeg.exe"))
+      candidates.push(path.join(base, "My_Media_App", "media", "video", "ffmpeg.exe"))
+    }
+  }
+
+  for (const c of candidates) {
+    try {
+      if (c && fs.existsSync(c) && fs.statSync(c).isFile()) {
+        cachedFfmpegPath = c
+        return c
+      }
+    } catch (e) {}
+  }
+
+  try {
+    const whereRes = spawnSync("where.exe", ["ffmpeg"], { windowsHide: true, encoding: "utf8" })
+    if (whereRes.status === 0 && whereRes.stdout) {
+      for (const line of whereRes.stdout.split(/\r?\n/)) {
+        const trimmed = line.trim()
+        if (trimmed && fs.existsSync(trimmed) && fs.statSync(trimmed).isFile()) {
+          cachedFfmpegPath = trimmed
+          return trimmed
+        }
+      }
+    }
+  } catch (e) {}
+  return null
+}
+
+function guessBridgeMime(filePath) {
+  const ext = path.extname(String(filePath || "")).replace(".", "").toLowerCase()
+  const map = {
+    mp4: "video/mp4",
+    m4v: "video/mp4",
+    webm: "video/webm",
+    mkv: "video/x-matroska",
+    avi: "video/x-msvideo",
+    mov: "video/quicktime",
+    ogv: "video/ogg",
+    ts: "video/mp2t",
+    m2ts: "video/mp2t",
+    mts: "video/mp2t",
+    mp3: "audio/mpeg",
+    wav: "audio/wav",
+    ogg: "audio/ogg",
+    flac: "audio/flac",
+    m4a: "audio/mp4",
+    aac: "audio/mp4",
+    dts: "audio/vnd.dts",
+    dtshd: "audio/vnd.dts",
+    ac3: "audio/ac3",
+    eac3: "audio/eac3",
+    wma: "audio/x-ms-wma",
+    png: "image/png",
+    jpg: "image/jpeg",
+    jpeg: "image/jpeg",
+    webp: "image/webp",
+    gif: "image/gif",
+    svg: "image/svg+xml",
+    vtt: "text/vtt; charset=utf-8",
+    srt: "text/plain; charset=utf-8",
+    txt: "text/plain; charset=utf-8",
+    json: "text/plain; charset=utf-8"
+  }
+  return map[ext] || "application/octet-stream"
+}
+
+function sendBridgeJson(res, status, obj) {
+  res.writeHead(status, {
+    "Content-Type": "application/json; charset=utf-8",
+    "Access-Control-Allow-Origin": "*",
+    "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+    "Access-Control-Allow-Headers": "Content-Type, Range"
+  })
+  res.end(JSON.stringify(obj))
+}
+
+function readBridgeJsonBody(req) {
+  return new Promise((resolve) => {
+    const chunks = []
+    req.on("data", (c) => chunks.push(c))
+    req.on("end", () => {
+      try {
+        const raw = Buffer.concat(chunks).toString("utf8").trim()
+        resolve(raw ? JSON.parse(raw) : {})
+      } catch (e) {
+        resolve({})
+      }
+    })
+    req.on("error", () => resolve({}))
+  })
+}
+
+function serveBridgeFileWithRanges(req, res, filePath) {
+  let stat
+  try {
+    stat = fs.statSync(filePath)
+  } catch (e) {
+    sendBridgeJson(res, 500, { error: e.message })
+    return
+  }
+  const totalLen = stat.size
+  const mime = guessBridgeMime(filePath)
+  const rangeHeader = req.headers.range
+  const cors = {
+    "Access-Control-Allow-Origin": "*",
+    "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+    "Access-Control-Allow-Headers": "Content-Type, Range"
+  }
+
+  if (rangeHeader && String(rangeHeader).startsWith("bytes=") && totalLen > 0) {
+    const spec = String(rangeHeader).slice(6)
+    const parts = spec.split("-")
+    const start = parseInt((parts[0] || "").trim(), 10) || 0
+    const reqEnd = parts[1] && parts[1].trim() !== "" ? parseInt(parts[1].trim(), 10) : totalLen - 1
+    if (start >= totalLen) {
+      res.writeHead(416, { ...cors, "Content-Range": `bytes */${totalLen}` })
+      res.end()
+      return
+    }
+    const end = Math.max(start, Math.min(totalLen - 1, isNaN(reqEnd) ? totalLen - 1 : reqEnd))
+    const len = end - start + 1
+    res.writeHead(206, {
+      ...cors,
+      "Content-Type": mime,
+      "Accept-Ranges": "bytes",
+      "Content-Range": `bytes ${start}-${end}/${totalLen}`,
+      "Content-Length": len
+    })
+    fs.createReadStream(filePath, { start, end }).pipe(res)
+    return
+  }
+
+  res.writeHead(200, {
+    ...cors,
+    "Content-Type": mime,
+    "Accept-Ranges": "bytes",
+    "Content-Length": totalLen
+  })
+  fs.createReadStream(filePath).pipe(res)
+}
+
+function langDisplayName(code) {
+  const c = String(code || "").trim().toLowerCase()
+  const map = {
+    ger: "Deutsch", deu: "Deutsch", de: "Deutsch",
+    eng: "Englisch", en: "Englisch",
+    jpn: "Japanisch", ja: "Japanisch",
+    fre: "Französisch", fra: "Französisch", fr: "Französisch",
+    spa: "Spanisch", es: "Spanisch",
+    ita: "Italienisch", it: "Italienisch",
+    por: "Portugiesisch", pt: "Portugiesisch",
+    rus: "Russisch", ru: "Russisch",
+    kor: "Koreanisch", ko: "Koreanisch",
+    chi: "Chinesisch", zho: "Chinesisch", zh: "Chinesisch",
+    tur: "Türkisch", tr: "Türkisch",
+    pol: "Polnisch", pl: "Polnisch",
+    dut: "Niederländisch", nld: "Niederländisch", nl: "Niederländisch",
+    ara: "Arabisch", ar: "Arabisch",
+    hin: "Hindi", hi: "Hindi",
+    und: "Unbekannt", "": "Unbekannt"
+  }
+  return map[c] !== undefined ? map[c] : ""
+}
+
+function isTextSubtitleCodec(codec) {
+  const tok = String(codec || "").split(/[\s(,[]/)[0].trim().toLowerCase()
+  return [
+    "subrip", "srt", "ass", "ssa", "webvtt", "vtt", "mov_text",
+    "tx3g", "text", "microdvd", "mpl2", "realtext", "sami",
+    "subviewer", "vplayer", "jacosub"
+  ].includes(tok)
+}
+
+function extractAudioCodecDisplay(details, codec) {
+  const cLower = String(codec || "").trim().toLowerCase()
+  const dLower = String(details || "").toLowerCase()
+  if (cLower === "dts" || cLower === "dca") {
+    if (dLower.includes("dts:x")) return "DTS:X"
+    if (dLower.includes("dts-hd ma")) return "DTS-HD MA"
+    if (dLower.includes("dts-hd hra")) return "DTS-HD HRA"
+    if (dLower.includes("dts-es")) return "DTS-ES"
+    if (dLower.includes("dts 96/24")) return "DTS 96/24"
+    return "DTS"
+  }
+  const map = { truehd: "TrueHD", eac3: "E-AC3", ac3: "AC3", aac: "AAC", flac: "FLAC", opus: "Opus", mp3: "MP3" }
+  return map[cLower] || String(codec || "").toUpperCase()
+}
+
+function extractAudioChannels(details) {
+  const parts = String(details || "").split(",").slice(1)
+  for (const part of parts) {
+    const low = part.trim().toLowerCase()
+    if (low.includes("7.1")) return "7.1"
+    if (low.includes("6.1")) return "6.1"
+    if (low.includes("5.1")) return "5.1"
+    if (low.startsWith("quad")) return "4.0"
+    if (low.includes("stereo") || low.startsWith("2 channels")) return "Stereo"
+    if (low.includes("mono") || low.startsWith("1 channels")) return "Mono"
+    if (low.includes("channels")) return part.trim()
+  }
+  return ""
+}
+
+function isNonBrowserAudioCodec(codec) {
+  return [
+    "dts", "dca", "ac3", "eac3", "truehd", "mlp",
+    "wmav1", "wmav2", "wmapro", "wmalossless", "pcm_bluray", "pcm_dvd"
+  ].includes(String(codec || "").trim().toLowerCase())
+}
+
+function findCompanionMkvForMp4(mp4Path) {
+  const parsed = path.parse(mp4Path)
+  const twin = path.join(parsed.dir, `${parsed.name}.mkv`)
+  try {
+    if (fs.existsSync(twin) && fs.statSync(twin).isFile()) return twin
+  } catch (e) {}
+  const targetMkv = `${parsed.name.toLowerCase()}.mkv`
+  const roots = []
+  const drive = parsed.root
+  if (drive) {
+    roots.push(path.join(drive, "Downloader", "Downloads"))
+    roots.push(path.join(drive, "Downloads"))
+  }
+  if (process.env.USERPROFILE) {
+    roots.push(path.join(process.env.USERPROFILE, "Downloads"))
+  }
+  if (!roots.some((r) => r.toLowerCase() === "e:\\downloader\\downloads")) {
+    roots.push("E:\\Downloader\\Downloads")
+  }
+  for (const root of roots) {
+    try {
+      if (!fs.existsSync(root) || !fs.statSync(root).isDirectory()) continue
+      for (const entry of fs.readdirSync(root, { withFileTypes: true })) {
+        if (entry.isFile() && entry.name.toLowerCase() === targetMkv) {
+          return path.join(root, entry.name)
+        }
+        if (entry.isDirectory()) {
+          const subDir = path.join(root, entry.name)
+          try {
+            for (const sub of fs.readdirSync(subDir, { withFileTypes: true })) {
+              if (sub.isFile() && sub.name.toLowerCase() === targetMkv) {
+                return path.join(subDir, sub.name)
+              }
+            }
+          } catch (e) {}
+        }
+      }
+    } catch (e) {}
+  }
+  return null
+}
+
+function resolveTrackSourcePaths(rawPath) {
+  const extLower = path.extname(String(rawPath || "")).replace(".", "").toLowerCase()
+  try {
+    if (fs.existsSync(rawPath) && fs.statSync(rawPath).isFile()) {
+      const companion = extLower === "mp4" || extLower === "m4v" ? findCompanionMkvForMp4(rawPath) : null
+      return { primary: rawPath, companion }
+    }
+  } catch (e) {}
+  if (extLower === "mkv") {
+    const parsed = path.parse(rawPath)
+    const twin = path.join(parsed.dir, `${parsed.name}.mp4`)
+    try {
+      if (fs.existsSync(twin) && fs.statSync(twin).isFile()) return { primary: twin, companion: null }
+    } catch (e) {}
+  }
+  return { primary: null, companion: null }
+}
+
+function runCommandAsync(binPath, args) {
+  return new Promise((resolve) => {
+    try {
+      const child = spawn(binPath, args, { windowsHide: true })
+      const out = []
+      const err = []
+      child.stdout.on("data", (d) => out.push(d))
+      child.stderr.on("data", (d) => err.push(d))
+      child.on("close", (code) => {
+        resolve({
+          ok: code === 0,
+          code,
+          stdout: Buffer.concat(out).toString("utf8"),
+          stderr: Buffer.concat(err).toString("utf8")
+        })
+      })
+      child.on("error", () => resolve({ ok: false, code: -1, stdout: "", stderr: "" }))
+    } catch (e) {
+      resolve({ ok: false, code: -1, stdout: "", stderr: "" })
+    }
+  })
+}
+
+async function probeMediaTracksAsync(mediaPath, mediaDir) {
+  let cacheKey = null
+  try {
+    const st = fs.statSync(mediaPath)
+    cacheKey = `${normalizePathKey(mediaPath)}|${st.size}|${Math.floor(st.mtimeMs)}`
+    if (probeTracksCache.has(cacheKey)) {
+      return JSON.parse(JSON.stringify(probeTracksCache.get(cacheKey)))
+    }
+  } catch (e) {}
+
+  const ffmpeg = findFfmpeg(mediaDir)
+  if (!ffmpeg) {
+    return { videoCodec: "", audio: [], subtitles: [] }
+  }
+  const res = await runCommandAsync(ffmpeg, ["-hide_banner", "-i", mediaPath])
+  const audioEntries = []
+  const subEntries = []
+  let videoCodec = ""
+  let active = null
+
+  for (const rawLine of (res.stderr || "").split(/\r?\n/)) {
+    const trimmed = rawLine.trim()
+    if (trimmed.startsWith("Stream #")) {
+      const audioPos = trimmed.indexOf(": Audio:")
+      const subPos = trimmed.indexOf(": Subtitle:")
+      const vidPos = trimmed.indexOf(": Video:")
+      if (audioPos !== -1) {
+        const header = trimmed.slice(0, audioPos)
+        const details = trimmed.slice(audioPos + 8).trim()
+        const mLang = header.match(/\(([^)]+)\)(?!.*\()/)
+        const lang = mLang && mLang[1] ? mLang[1].trim().toLowerCase() : "und"
+        const codec = (details.split(/[\s,(]/).find(Boolean) || "").toLowerCase()
+        const lower = details.toLowerCase()
+        const idx = audioEntries.length
+        audioEntries.push({
+          index: idx,
+          lang,
+          langName: langDisplayName(lang) || lang.toUpperCase(),
+          codec,
+          codecDisplay: extractAudioCodecDisplay(details, codec),
+          channels: extractAudioChannels(details),
+          title: "",
+          isDefault: lower.includes("(default)"),
+          isForced: lower.includes("(forced)")
+        })
+        active = audioEntries[idx]
+      } else if (subPos !== -1) {
+        const header = trimmed.slice(0, subPos)
+        const details = trimmed.slice(subPos + 11).trim()
+        const mLang = header.match(/\(([^)]+)\)(?!.*\()/)
+        const lang = mLang && mLang[1] ? mLang[1].trim().toLowerCase() : "und"
+        const codec = (details.split(/[\s,(]/).find(Boolean) || "").toLowerCase()
+        const lower = details.toLowerCase()
+        const idx = subEntries.length
+        subEntries.push({
+          index: idx,
+          lang,
+          langName: langDisplayName(lang) || lang.toUpperCase(),
+          codec,
+          title: "",
+          isDefault: lower.includes("(default)"),
+          isForced: lower.includes("(forced)"),
+          isText: isTextSubtitleCodec(codec),
+          source: "embedded"
+        })
+        active = subEntries[idx]
+      } else if (vidPos !== -1) {
+        if (!videoCodec && !trimmed.toLowerCase().includes("(attached pic)")) {
+          const details = trimmed.slice(vidPos + 8).trim()
+          videoCodec = (details.split(/[\s,(]/).find(Boolean) || "").toLowerCase()
+        }
+        active = null
+      } else {
+        active = null
+      }
+      continue
+    }
+    if (!rawLine.startsWith("    ")) {
+      active = null
+      continue
+    }
+    const colonIdx = trimmed.indexOf(":")
+    if (colonIdx > 0 && active) {
+      const k = trimmed.slice(0, colonIdx).trim().toLowerCase()
+      const v = trimmed.slice(colonIdx + 1).trim()
+      if (k === "title" && v) {
+        active.title = v
+      }
+    }
+  }
+
+  const probed = { videoCodec, audio: audioEntries, subtitles: subEntries }
+  if (cacheKey) {
+    probeTracksCache.set(cacheKey, JSON.parse(JSON.stringify(probed)))
+  }
+  return probed
+}
+
+function runSerializedMediaJob(key, fn) {
+  if (inFlightMediaJobs.has(key)) return inFlightMediaJobs.get(key)
+  const p = Promise.resolve().then(fn).finally(() => {
+    inFlightMediaJobs.delete(key)
+  })
+  inFlightMediaJobs.set(key, p)
+  return p
+}
+
+async function resolvePlayableMediaPathAsync(origPath, mediaDir) {
+  const ext = path.extname(origPath).replace(".", "").toLowerCase()
+  const isStandaloneTranscodeAudio = ["dts", "dtshd", "ac3", "eac3", "wma"].includes(ext)
+  const isAlwaysRemuxVideo = ["mkv", "avi", "flv", "wmv", "ts", "m2ts"].includes(ext)
+  if (isStandaloneTranscodeAudio) {
+    const ffmpeg = findFfmpeg(mediaDir)
+    if (!ffmpeg) return origPath
+    const cacheDir = path.join(mediaDir, ".mkv_cache")
+    const outM4a = path.join(cacheDir, `audio_only_${fileHashHex(origPath, "aac256")}.m4a`)
+    if (fs.existsSync(outM4a) && fs.statSync(outM4a).size > 128) return outM4a
+    return runSerializedMediaJob(outM4a, async () => {
+      if (fs.existsSync(outM4a) && fs.statSync(outM4a).size > 128) return outM4a
+      fs.mkdirSync(cacheDir, { recursive: true })
+      const tmp = path.join(cacheDir, `audio_only_${fileHashHex(origPath, "aac256")}.tmp.m4a`)
+      try { fs.unlinkSync(tmp) } catch (e) {}
+      const r = await runCommandAsync(ffmpeg, [
+        "-nostdin", "-err_detect", "ignore_err", "-fflags", "+genpts",
+        "-i", origPath, "-vn", "-sn", "-dn",
+        "-c:a", "aac", "-aac_coder", "fast", "-b:a", "256k", "-ac", "2",
+        "-movflags", "+faststart", "-y", tmp
+      ])
+      if (r.ok && fs.existsSync(tmp) && fs.statSync(tmp).size > 128) {
+        fs.renameSync(tmp, outM4a)
+        return outM4a
+      }
+      try { fs.unlinkSync(tmp) } catch (e) {}
+      return origPath
+    })
+  }
+
+  let probed = null
+  if (["mp4", "m4v", "mov"].includes(ext)) {
+    probed = await probeMediaTracksAsync(origPath, mediaDir)
+    const needsAudio = probed.audio.length > 0 && isNonBrowserAudioCodec(probed.audio[0].codec)
+    const needsVideo = probed.videoCodec === "mpeg2video" || probed.videoCodec === "mpeg1video" || probed.videoCodec === "wmv3"
+    if (!needsAudio && !needsVideo) return origPath
+  } else if (!isAlwaysRemuxVideo) {
+    return origPath
+  }
+
+  if (!probed) probed = await probeMediaTracksAsync(origPath, mediaDir)
+  const ffmpeg = findFfmpeg(mediaDir)
+  if (!ffmpeg) return origPath
+  const cacheDir = path.join(mediaDir, ".mkv_cache")
+  const outMp4 = path.join(cacheDir, `v3_${fileHashHex(origPath, "remux")}.mp4`)
+  if (fs.existsSync(outMp4) && fs.statSync(outMp4).size > 1024) return outMp4
+
+  return runSerializedMediaJob(outMp4, async () => {
+    if (fs.existsSync(outMp4) && fs.statSync(outMp4).size > 1024) return outMp4
+    fs.mkdirSync(cacheDir, { recursive: true })
+    const tmp = path.join(cacheDir, `v3_${fileHashHex(origPath, "remux")}.tmp.mp4`)
+    const firstAudioCodec = probed.audio[0] ? probed.audio[0].codec : ""
+    const copyAudio = firstAudioCodec === "aac" || firstAudioCodec === "mp3"
+    const isHevc = probed.videoCodec === "hevc" || probed.videoCodec === "h265"
+    const runRemux = async (transcodeVideo, audioCopy) => {
+      try { fs.unlinkSync(tmp) } catch (e) {}
+      const args = ["-nostdin", "-err_detect", "ignore_err"]
+      if (transcodeVideo) args.push("-fflags", "+genpts")
+      args.push("-i", origPath, "-map", "0:v:0", "-map", "0:a:0?", "-map_metadata", "0")
+      if (transcodeVideo) {
+        args.push("-c:v", "libx264", "-preset", "veryfast", "-crf", "21", "-pix_fmt", "yuv420p")
+      } else {
+        args.push("-c:v", "copy")
+        if (isHevc) args.push("-tag:v", "hvc1", "-strict", "unofficial")
+      }
+      if (audioCopy) {
+        args.push("-c:a", "copy")
+      } else {
+        args.push("-c:a", "aac", "-aac_coder", "fast", "-b:a", "256k", "-ac", "2")
+      }
+      args.push("-movflags", "+faststart", "-y", tmp)
+      const r = await runCommandAsync(ffmpeg, args)
+      return r.ok && fs.existsSync(tmp) && fs.statSync(tmp).size > 1024
+    }
+    const ok = (await runRemux(false, copyAudio)) ||
+      (copyAudio && (await runRemux(false, false))) ||
+      (await runRemux(true, false))
+    if (ok) {
+      fs.renameSync(tmp, outMp4)
+      return outMp4
+    }
+    try { fs.unlinkSync(tmp) } catch (e) {}
+    return origPath
+  })
+}
+
+function buildSystemCheckPayload() {
+  const { isPackaged, appDir, mediaDir } = getBridgePaths()
+  const version = app ? app.getVersion() : "1.0.0"
+  const bundledFfmpeg = path.join(mediaDir, "video", "ffmpeg.exe")
+  const ffmpegOpt = findFfmpeg(mediaDir)
+  const ffmpegBundled = fs.existsSync(bundledFfmpeg) && fs.statSync(bundledFfmpeg).isFile()
+
+  const checkBridge = {
+    id: "bridge",
+    title: "Media-Bridge & Multi-Track-Server",
+    status: "ok",
+    summary: `Aktiv (Port ${STREAM_BRIDGE_PORT})`,
+    detail: `Laufzeit: Electron Desktop (v${version}) – Streaming, Tonspur-Wechsel & Untertitel-Extraktion aktiv.`
+  }
+
+  let ffmpegExecOk = false
+  let ffmpegVersionLine = ""
+  if (ffmpegOpt) {
+    try {
+      const r = spawnSync(ffmpegOpt, ["-version"], { windowsHide: true, encoding: "utf8" })
+      if (r.status === 0) {
+        ffmpegExecOk = true
+        ffmpegVersionLine = String(r.stdout || "").split(/\r?\n/)[0].trim()
+      }
+    } catch (e) {}
+  }
+
+  let checkFfmpeg
+  if (!ffmpegOpt) {
+    checkFfmpeg = {
+      id: "ffmpeg",
+      title: "FFmpeg-Engine (MKV, Tonspuren & Thumbnails)",
+      status: "err",
+      summary: "Fehlt",
+      detail: `ffmpeg.exe nicht gefunden (erwartet unter ${bundledFfmpeg}). Multi-Audio, MKV-Konvertierung und Video-Thumbnails sind ohne FFmpeg nicht verfügbar.`
+    }
+  } else if (!ffmpegExecOk) {
+    checkFfmpeg = {
+      id: "ffmpeg",
+      title: "FFmpeg-Engine (MKV, Tonspuren & Thumbnails)",
+      status: "err",
+      summary: "Nicht ausführbar",
+      detail: `Datei gefunden unter ${ffmpegOpt}, konnte aber nicht gestartet werden.`
+    }
+  } else if (ffmpegBundled) {
+    checkFfmpeg = {
+      id: "ffmpeg",
+      title: "FFmpeg-Engine (MKV, Tonspuren & Thumbnails)",
+      status: "ok",
+      summary: "Bereit (im App-Ordner)",
+      detail: `${ffmpegOpt} (${ffmpegVersionLine})`
+    }
+  } else {
+    checkFfmpeg = {
+      id: "ffmpeg",
+      title: "FFmpeg-Engine (MKV, Tonspuren & Thumbnails)",
+      status: "warn",
+      summary: "Extern gefunden",
+      detail: `Gefunden unter ${ffmpegOpt} – 'Automatisch reparieren' kopiert ffmpeg.exe fest nach media\\video\\ffmpeg.exe.`
+    }
+  }
+
+  const expectedCodecs = ["aac", "dca", "ac3", "eac3", "subrip", "webvtt"]
+  const supportedCodecs = []
+  if (ffmpegOpt && ffmpegExecOk) {
+    try {
+      const r = spawnSync(ffmpegOpt, ["-hide_banner", "-codecs"], { windowsHide: true, encoding: "utf8" })
+      if (r.status === 0) {
+        const lower = String(r.stdout || "").toLowerCase()
+        for (const c of expectedCodecs) {
+          if (lower.includes(c)) supportedCodecs.push(c)
+        }
+      }
+    } catch (e) {}
+  }
+
+  let checkCodecs
+  if (!ffmpegOpt || !ffmpegExecOk) {
+    checkCodecs = {
+      id: "codecs",
+      title: "Audio- & Untertitel-Codecs (AAC, DTS, AC3, WebVTT)",
+      status: "err",
+      summary: "Nicht prüfbar",
+      detail: "FFmpeg erforderlich, um DTS/AC3/E-AC3 zu decodieren und WebVTT/SRT-Untertitel zu extrahieren."
+    }
+  } else if (supportedCodecs.length === expectedCodecs.length) {
+    checkCodecs = {
+      id: "codecs",
+      title: "Audio- & Untertitel-Codecs (AAC, DTS, AC3, WebVTT)",
+      status: "ok",
+      summary: `${supportedCodecs.length}/${expectedCodecs.length} Codecs aktiv`,
+      detail: `Aktiv: ${supportedCodecs.join(", ").toUpperCase()} – DTS, AC3, E-AC3, AAC sowie MKV-Untertitel (SRT/ASS/WebVTT) werden voll unterstützt.`
+    }
+  } else if (supportedCodecs.includes("aac") && supportedCodecs.includes("dca") && supportedCodecs.includes("webvtt")) {
+    checkCodecs = {
+      id: "codecs",
+      title: "Audio- & Untertitel-Codecs (AAC, DTS, AC3, WebVTT)",
+      status: "warn",
+      summary: `${supportedCodecs.length}/${expectedCodecs.length} Codecs aktiv`,
+      detail: `Erkannt: ${supportedCodecs.join(", ").toUpperCase()}`
+    }
+  } else {
+    checkCodecs = {
+      id: "codecs",
+      title: "Audio- & Untertitel-Codecs (AAC, DTS, AC3, WebVTT)",
+      status: "err",
+      summary: "Eingeschränkt",
+      detail: "Wichtige Codecs (AAC/DTS/WebVTT) fehlen in der verwendeten ffmpeg.exe."
+    }
+  }
+
+  const folderErrors = []
+  for (const dir of [
+    mediaDir,
+    path.join(mediaDir, "video"),
+    path.join(mediaDir, "music"),
+    path.join(mediaDir, "covers"),
+    path.join(mediaDir, ".mkv_cache"),
+    path.join(mediaDir, ".sub_cache")
+  ]) {
+    try {
+      fs.mkdirSync(dir, { recursive: true })
+      const probe = path.join(dir, ".write_test")
+      fs.writeFileSync(probe, "ok", "utf8")
+      fs.unlinkSync(probe)
+    } catch (e) {
+      folderErrors.push(`${dir}: ${e.message}`)
+    }
+  }
+  const checkFolders = folderErrors.length === 0
+    ? {
+        id: "folders",
+        title: "Medien- & Cache-Ordner (.mkv_cache, .sub_cache)",
+        status: "ok",
+        summary: "Alle 6 Ordner beschreibbar",
+        detail: `Medienbasis: ${mediaDir}`
+      }
+    : {
+        id: "folders",
+        title: "Medien- & Cache-Ordner (.mkv_cache, .sub_cache)",
+        status: "err",
+        summary: `${folderErrors.length} Problem(e)`,
+        detail: folderErrors.join(" | ")
+      }
+
+  let fontCount = 0
+  let presetCount = 0
+  try {
+    fontCount = fs.readdirSync(path.join(mediaDir, "fonts")).filter((n) => /\.(ttf|otf)$/i.test(n)).length
+  } catch (e) {}
+  try {
+    presetCount = fs.readdirSync(path.join(mediaDir, "presets")).filter((n) => /\.png$/i.test(n)).length
+  } catch (e) {}
+  const checkAssets = fontCount > 0 && presetCount > 0
+    ? {
+        id: "assets",
+        title: "Zeichenstudio, Equalizer & Oberfläche",
+        status: "ok",
+        summary: `${fontCount} Fonts · ${presetCount} Presets`,
+        detail: "Schriftarten, Cursor-Presets sowie AudioContext-Equalizer sind einsatzbereit."
+      }
+    : {
+        id: "assets",
+        title: "Zeichenstudio, Equalizer & Oberfläche",
+        status: "warn",
+        summary: `${fontCount} Fonts · ${presetCount} Presets`,
+        detail: "Einige Font- oder Preset-Ressourcen in media\\fonts / media\\presets fehlen (Standard-Fallbacks aktiv)."
+      }
+
+  let updaterStatus = "err"
+  let updaterSummary = "Nicht verfügbar"
+  let updaterDetail = "Fetch / Netzwerkmodul fehlt."
+  if (typeof fetch === "function") {
+    updaterStatus = "ok"
+    updaterSummary = isPackaged ? "Bereit (app.asar Patcher)" : "Bereit (Entwicklungsmodus)"
+    updaterDetail = "Integrierter HTTP-Download (Node Fetch) & Patch-Updater aktiv."
+  }
+  const checkUpdater = {
+    id: "updater",
+    title: "Online-Updater & Netzwerk-Download",
+    status: updaterStatus,
+    summary: updaterSummary,
+    detail: updaterDetail
+  }
+
+  const checks = [checkBridge, checkFfmpeg, checkCodecs, checkFolders, checkAssets, checkUpdater]
+  const allReady = checks.every((c) => c.status === "ok")
+
+  return {
+    ok: true,
+    allReady,
+    runtime: "electron",
+    runtimeLabel: "Electron Desktop",
+    version,
+    isPackaged,
+    appDir,
+    mediaDir,
+    execPath: process.execPath,
+    ffmpegPath: ffmpegOpt || null,
+    ffmpegBundled,
+    supportedCodecs,
+    checks
+  }
+}
+
+function runSystemRepair(customFfmpegPath) {
+  const { mediaDir } = getBridgePaths()
+  const repairedActions = []
+  for (const sub of ["video", "music", "covers", "snapshots", "references", "logo", "cursor", "fonts", "presets", ".mkv_cache", ".sub_cache"]) {
+    const d = path.join(mediaDir, sub)
+    if (!fs.existsSync(d)) {
+      try {
+        fs.mkdirSync(d, { recursive: true })
+        repairedActions.push(`Ordner erstellt: ${d}`)
+      } catch (e) {}
+    }
+  }
+  clearFfmpegAndProbeCaches()
+  const destFfmpeg = path.join(mediaDir, "video", "ffmpeg.exe")
+  const custom = String(customFfmpegPath || "").trim()
+  if (custom && fs.existsSync(custom) && fs.statSync(custom).isFile()) {
+    if (normalizePathKey(custom) !== normalizePathKey(destFfmpeg)) {
+      fs.copyFileSync(custom, destFfmpeg)
+      repairedActions.push(`FFmpeg von ${custom} nach ${destFfmpeg} installiert`)
+    }
+  } else if (!fs.existsSync(destFfmpeg)) {
+    const found = findFfmpeg(mediaDir)
+    if (found && normalizePathKey(found) !== normalizePathKey(destFfmpeg)) {
+      fs.copyFileSync(found, destFfmpeg)
+      repairedActions.push(`FFmpeg automatisch von ${found} nach ${destFfmpeg} kopiert`)
+    }
+  }
+  for (const sub of [".mkv_cache", ".sub_cache"]) {
+    const d = path.join(mediaDir, sub)
+    try {
+      for (const name of fs.readdirSync(d)) {
+        if (name.toLowerCase().includes(".tmp.")) {
+          try {
+            fs.unlinkSync(path.join(d, name))
+            repairedActions.push(`Verwaiste Temp-Datei bereinigt: ${name}`)
+          } catch (e) {}
+        }
+      }
+    } catch (e) {}
+  }
+  clearFfmpegAndProbeCaches()
+  const payload = buildSystemCheckPayload()
+  payload.repairedActions = repairedActions
+  return payload
+}
+
+// Local HTTP Bridge Server for Twitch, YouTube, Multi-Audio/Subtitles & Diagnostics
 function startStreamBridgeServer() {
   if (streamBridgeServer) return;
   try {
-    streamBridgeServer = http.createServer((req, res) => {
+    streamBridgeServer = http.createServer(async (req, res) => {
+      if (req.method === 'OPTIONS') {
+        res.writeHead(204, {
+          'Access-Control-Allow-Origin': '*',
+          'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+          'Access-Control-Allow-Headers': 'Content-Type, Range'
+        });
+        res.end();
+        return;
+      }
+
       const parsedUrl = new URL(req.url, `http://127.0.0.1:${STREAM_BRIDGE_PORT}`);
       const pathname = parsedUrl.pathname;
-      
+      const { appDir, mediaDir, isPackaged } = getBridgePaths();
+
+      if (pathname === '/api/info') {
+        sendBridgeJson(res, 200, {
+          version: app ? app.getVersion() : '1.0.0',
+          isPackaged,
+          appDir,
+          mediaDir,
+          execPath: process.execPath,
+          resourcesDir: process.resourcesPath || appDir,
+          homeDir: os.homedir(),
+          tempDir: os.tmpdir()
+        });
+        return;
+      }
+
+      if (pathname === '/api/system-check') {
+        sendBridgeJson(res, 200, buildSystemCheckPayload());
+        return;
+      }
+
+      if (pathname === '/api/system-repair') {
+        const body = await readBridgeJsonBody(req);
+        sendBridgeJson(res, 200, runSystemRepair(body.customFfmpegPath));
+        return;
+      }
+
+      if (pathname === '/api/media/tracks') {
+        const body = await readBridgeJsonBody(req);
+        const rawPath = String(body.path || '').trim();
+        if (!rawPath) {
+          sendBridgeJson(res, 400, { error: 'Missing path' });
+          return;
+        }
+        const { primary, companion } = resolveTrackSourcePaths(rawPath);
+        if (!primary) {
+          sendBridgeJson(res, 404, { error: 'Media file not found' });
+          return;
+        }
+        const probed = await probeMediaTracksAsync(primary, mediaDir);
+        if (companion) {
+          const comp = await probeMediaTracksAsync(companion, mediaDir);
+          if (comp.audio.length > probed.audio.length) probed.audio = comp.audio;
+          if (probed.subtitles.length === 0 && comp.subtitles.length > 0) probed.subtitles = comp.subtitles;
+        }
+        const savedDir = savedSubsDirForMedia(mediaDir, rawPath);
+        if (probed.subtitles.length === 0) {
+          try {
+            const manifest = JSON.parse(fs.readFileSync(path.join(savedDir, 'manifest.json'), 'utf8'));
+            if (Array.isArray(manifest) && manifest.length > 0) probed.subtitles = manifest;
+          } catch (e) {}
+        }
+        try {
+          const savedAudio = JSON.parse(fs.readFileSync(path.join(savedDir, 'audio_tracks.json'), 'utf8'));
+          if (Array.isArray(savedAudio) && savedAudio.length === probed.audio.length) {
+            probed.audio.forEach((dst, idx) => {
+              const src = savedAudio[idx] || {};
+              if (!dst.title && src.title) dst.title = src.title;
+              if (!dst.codecDisplay && src.codecDisplay) dst.codecDisplay = src.codecDisplay;
+              if (!dst.channels && src.channels) dst.channels = src.channels;
+            });
+          }
+        } catch (e) {}
+        sendBridgeJson(res, 200, {
+          ok: true,
+          path: rawPath,
+          resolvedPath: primary,
+          ffmpegAvailable: Boolean(findFfmpeg(mediaDir)),
+          audioTracks: probed.audio,
+          subtitleTracks: probed.subtitles
+        });
+        return;
+      }
+
+      if (pathname === '/api/media/extract_subtitles') {
+        const body = await readBridgeJsonBody(req);
+        const rawPath = String(body.path || '').trim();
+        if (!rawPath) {
+          sendBridgeJson(res, 400, { error: 'Missing path' });
+          return;
+        }
+        let srcPath = fs.existsSync(rawPath) && fs.statSync(rawPath).isFile() ? rawPath : resolveTrackSourcePaths(rawPath).primary;
+        if (!srcPath) {
+          sendBridgeJson(res, 404, { error: 'Media file not found' });
+          return;
+        }
+        const ffmpeg = findFfmpeg(mediaDir);
+        if (!ffmpeg) {
+          sendBridgeJson(res, 200, { ok: false, count: 0, error: 'ffmpeg missing' });
+          return;
+        }
+        const probed = await probeMediaTracksAsync(srcPath, mediaDir);
+        const savedDir = savedSubsDirForMedia(mediaDir, rawPath);
+        fs.mkdirSync(savedDir, { recursive: true });
+        if (probed.audio.length > 0) {
+          try { fs.writeFileSync(path.join(savedDir, 'audio_tracks.json'), JSON.stringify(probed.audio, null, 2), 'utf8'); } catch (e) {}
+        }
+        const manifest = [];
+        for (const item of probed.subtitles) {
+          if (!item.isText) continue;
+          const vttName = `sub_${item.index}.vtt`;
+          const outVtt = path.join(savedDir, vttName);
+          const tmpVtt = path.join(savedDir, `sub_${item.index}.tmp.vtt`);
+          try { fs.unlinkSync(tmpVtt); } catch (e) {}
+          const r = await runCommandAsync(ffmpeg, [
+            '-nostdin', '-err_detect', 'ignore_err', '-i', srcPath,
+            '-map', `0:s:${item.index}`, '-c:s', 'webvtt', '-y', tmpVtt
+          ]);
+          if (r.ok && fs.existsSync(tmpVtt) && fs.statSync(tmpVtt).size > 10) {
+            fs.renameSync(tmpVtt, outVtt);
+            manifest.push({ ...item, source: 'saved', file: vttName });
+          } else {
+            try { fs.unlinkSync(tmpVtt); } catch (e) {}
+          }
+        }
+        try { fs.writeFileSync(path.join(savedDir, 'manifest.json'), JSON.stringify(manifest, null, 2), 'utf8'); } catch (e) {}
+        sendBridgeJson(res, 200, { ok: true, count: manifest.length, savedDir, subtitleTracks: manifest });
+        return;
+      }
+
+      if (pathname === '/media') {
+        const rawPath = parsedUrl.searchParams.get('path') || '';
+        if (!rawPath) { sendBridgeJson(res, 400, { error: 'Missing path param' }); return; }
+        let target = null;
+        if (fs.existsSync(rawPath) && fs.statSync(rawPath).isFile()) {
+          target = await resolvePlayableMediaPathAsync(rawPath, mediaDir);
+        } else if (rawPath.toLowerCase().endsWith('.mkv')) {
+          const parsed = path.parse(rawPath);
+          const twin = path.join(parsed.dir, `${parsed.name}.mp4`);
+          if (fs.existsSync(twin) && fs.statSync(twin).isFile()) target = twin;
+        }
+        if (!target) { sendBridgeJson(res, 404, { error: 'Media file not found' }); return; }
+        serveBridgeFileWithRanges(req, res, target);
+        return;
+      }
+
+      if (pathname === '/media/audio') {
+        const rawPath = parsedUrl.searchParams.get('path') || '';
+        const track = parseInt(parsedUrl.searchParams.get('track') || '', 10);
+        if (!rawPath || isNaN(track) || track < 0 || track >= 32) {
+          sendBridgeJson(res, 400, { error: 'Invalid track or path param' });
+          return;
+        }
+        const { primary, companion } = resolveTrackSourcePaths(rawPath);
+        if (!primary) { sendBridgeJson(res, 404, { error: 'Media file not found' }); return; }
+        let audioSrc = primary;
+        if (companion) {
+          const pProbe = await probeMediaTracksAsync(primary, mediaDir);
+          if (track >= pProbe.audio.length) audioSrc = companion;
+        }
+        const cacheDir = path.join(mediaDir, '.mkv_cache');
+        const cacheM4a = path.join(cacheDir, `audio_${fileHashHex(audioSrc, `a${track}`)}_t${track}.m4a`);
+        if (fs.existsSync(cacheM4a) && fs.statSync(cacheM4a).size > 128) {
+          serveBridgeFileWithRanges(req, res, cacheM4a);
+          return;
+        }
+        const ffmpeg = findFfmpeg(mediaDir);
+        if (!ffmpeg) { sendBridgeJson(res, 500, { error: 'ffmpeg.exe nicht gefunden' }); return; }
+        const ok = await runSerializedMediaJob(cacheM4a, async () => {
+          if (fs.existsSync(cacheM4a) && fs.statSync(cacheM4a).size > 128) return true;
+          fs.mkdirSync(cacheDir, { recursive: true });
+          const tmpM4a = path.join(cacheDir, `audio_${fileHashHex(audioSrc, `a${track}`)}_t${track}.tmp.m4a`);
+          const aProbed = await probeMediaTracksAsync(audioSrc, mediaDir);
+          const codec = aProbed.audio[track] ? aProbed.audio[track].codec : '';
+          const canCopy = codec === 'aac';
+          const extract = async (copyOnly) => {
+            try { fs.unlinkSync(tmpM4a); } catch (e) {}
+            const args = ['-nostdin', '-err_detect', 'ignore_err'];
+            if (!copyOnly) args.push('-fflags', '+genpts');
+            args.push('-i', audioSrc, '-vn', '-sn', '-dn', '-map', `0:a:${track}`);
+            if (copyOnly) args.push('-c:a', 'copy');
+            else args.push('-c:a', 'aac', '-aac_coder', 'fast', '-b:a', '320k', '-ac', '2');
+            args.push('-movflags', '+faststart', '-y', tmpM4a);
+            const r = await runCommandAsync(ffmpeg, args);
+            return r.ok && fs.existsSync(tmpM4a) && fs.statSync(tmpM4a).size > 128;
+          };
+          if ((canCopy && (await extract(true))) || (await extract(false))) {
+            fs.renameSync(tmpM4a, cacheM4a);
+            return true;
+          }
+          try { fs.unlinkSync(tmpM4a); } catch (e) {}
+          return false;
+        });
+        if (ok && fs.existsSync(cacheM4a)) {
+          serveBridgeFileWithRanges(req, res, cacheM4a);
+        } else {
+          sendBridgeJson(res, 500, { error: 'Audio track extraction failed' });
+        }
+        return;
+      }
+
+      if (pathname === '/media/subtitle') {
+        const rawPath = parsedUrl.searchParams.get('path') || '';
+        const track = parseInt(parsedUrl.searchParams.get('track') || '', 10);
+        if (!rawPath || isNaN(track) || track < 0 || track >= 32) {
+          sendBridgeJson(res, 400, { error: 'Invalid track or path param' });
+          return;
+        }
+        const savedDir = savedSubsDirForMedia(mediaDir, rawPath);
+        const savedVtt = path.join(savedDir, `sub_${track}.vtt`);
+        if (fs.existsSync(savedVtt) && fs.statSync(savedVtt).size > 10) {
+          serveBridgeFileWithRanges(req, res, savedVtt);
+          return;
+        }
+        const { primary, companion } = resolveTrackSourcePaths(rawPath);
+        if (!primary) { sendBridgeJson(res, 404, { error: 'Media file not found' }); return; }
+        let subSrc = primary;
+        if (companion) {
+          const pProbe = await probeMediaTracksAsync(primary, mediaDir);
+          if (track >= pProbe.subtitles.length) subSrc = companion;
+        }
+        const cacheDir = path.join(mediaDir, '.sub_cache');
+        const cacheVtt = path.join(cacheDir, `sub_${fileHashHex(subSrc, `s${track}`)}_s${track}.vtt`);
+        if (fs.existsSync(cacheVtt) && fs.statSync(cacheVtt).size > 10) {
+          serveBridgeFileWithRanges(req, res, cacheVtt);
+          return;
+        }
+        const ffmpeg = findFfmpeg(mediaDir);
+        if (!ffmpeg) { sendBridgeJson(res, 500, { error: 'ffmpeg.exe nicht gefunden' }); return; }
+        const ok = await runSerializedMediaJob(cacheVtt, async () => {
+          if (fs.existsSync(cacheVtt) && fs.statSync(cacheVtt).size > 10) return true;
+          fs.mkdirSync(cacheDir, { recursive: true });
+          const tmpVtt = path.join(cacheDir, `sub_${fileHashHex(subSrc, `s${track}`)}_s${track}.tmp.vtt`);
+          try { fs.unlinkSync(tmpVtt); } catch (e) {}
+          const r = await runCommandAsync(ffmpeg, [
+            '-nostdin', '-err_detect', 'ignore_err', '-i', subSrc,
+            '-map', `0:s:${track}`, '-c:s', 'webvtt', '-y', tmpVtt
+          ]);
+          if (r.ok && fs.existsSync(tmpVtt) && fs.statSync(tmpVtt).size > 10) {
+            fs.renameSync(tmpVtt, cacheVtt);
+            return true;
+          }
+          try { fs.unlinkSync(tmpVtt); } catch (e) {}
+          return false;
+        });
+        if (ok && fs.existsSync(cacheVtt)) {
+          serveBridgeFileWithRanges(req, res, cacheVtt);
+        } else {
+          sendBridgeJson(res, 500, { error: 'Subtitle track extraction failed' });
+        }
+        return;
+      }
+
       res.setHeader('Access-Control-Allow-Origin', '*');
       res.setHeader('Content-Type', 'text/html; charset=utf-8');
 
@@ -674,6 +1745,48 @@ ipcMain.handle("pick-local-update-file", async (event) => {
     return { success: true, filePath: tempFile, originalName: path.basename(chosenFile) };
   } catch (err) {
     return { success: false, error: err.message };
+  }
+});
+
+ipcMain.handle("run-system-check", async () => {
+  try {
+    return buildSystemCheckPayload();
+  } catch (err) {
+    return { ok: false, allReady: false, error: err.message, checks: [] };
+  }
+});
+
+ipcMain.handle("run-system-repair", async (event, opts = {}) => {
+  try {
+    return runSystemRepair(opts && opts.customFfmpegPath);
+  } catch (err) {
+    return { ok: false, allReady: false, error: err.message, checks: [], repairedActions: [] };
+  }
+});
+
+ipcMain.handle("pick-ffmpeg-file", async (event) => {
+  try {
+    const win = BrowserWindow.fromWebContents(event.sender) || mainWindow;
+    const res = await dialog.showOpenDialog(win, {
+      title: "ffmpeg.exe auswählen",
+      filters: [{ name: "FFmpeg Executable", extensions: ["exe"] }],
+      properties: ["openFile"]
+    });
+    if (res.canceled || !res.filePaths || res.filePaths.length === 0) {
+      return { success: false, canceled: true };
+    }
+    const chosenFile = res.filePaths[0];
+    const { mediaDir } = getBridgePaths();
+    const targetDir = path.join(mediaDir, "video");
+    fs.mkdirSync(targetDir, { recursive: true });
+    const dest = path.join(targetDir, "ffmpeg.exe");
+    if (normalizePathKey(chosenFile) !== normalizePathKey(dest)) {
+      fs.copyFileSync(chosenFile, dest);
+    }
+    clearFfmpegAndProbeCaches();
+    return { success: true, canceled: false, filePath: chosenFile, installedTo: dest };
+  } catch (err) {
+    return { success: false, canceled: false, error: err.message };
   }
 });
 

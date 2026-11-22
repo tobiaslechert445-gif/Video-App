@@ -25,6 +25,29 @@ const videoFolder = path.join(mediaBase, "video");
 if (!fs.existsSync(videoFolder)) fs.mkdirSync(videoFolder, { recursive: true });
 
 const ffmpegPath = path.join(videoFolder, "ffmpeg.exe");
+let cachedFrontendFfmpegPath = "";
+function resolveFfmpegExecutable() {
+  if (cachedFrontendFfmpegPath && fs.existsSync(cachedFrontendFfmpegPath)) {
+    return cachedFrontendFfmpegPath;
+  }
+  const candidates = [ffmpegPath, path.join(mediaBase, "ffmpeg.exe")];
+  try {
+    if (typeof process !== "undefined" && process.execPath) {
+      const exeDir = path.dirname(process.execPath);
+      candidates.push(path.join(exeDir, "ffmpeg.exe"));
+      candidates.push(path.join(exeDir, "media", "video", "ffmpeg.exe"));
+    }
+  } catch (e) {}
+  for (const c of candidates) {
+    try {
+      if (c && fs.existsSync(c)) {
+        cachedFrontendFfmpegPath = c;
+        return c;
+      }
+    } catch (e) {}
+  }
+  return ffmpegPath;
+}
 const crypto = require("crypto");
 
 // Sicherer Pfad-Resolver für File-Objekte (Electron 41+ webUtils & Tauri kompatibel)
@@ -1856,8 +1879,9 @@ function runNextMkvConversion() {
         }
     }
 
-    if (!fs.existsSync(ffmpegPath)) {
-        console.error("ffmpeg.exe nicht gefunden unter:", ffmpegPath);
+    const activeFfmpeg = resolveFfmpegExecutable();
+    if (!fs.existsSync(activeFfmpeg)) {
+        console.error("ffmpeg.exe nicht gefunden unter:", activeFfmpeg);
         if (typeof showVideoToast === "function") {
             showVideoToast("⚠️ ffmpeg.exe fehlt – MKV wird per Direkt-Stream wiedergegeben.");
         }
@@ -1865,7 +1889,7 @@ function runNextMkvConversion() {
         return;
     }
 
-    const proc = spawn(ffmpegPath, [
+    const proc = spawn(activeFfmpeg, [
         '-nostdin',
         '-err_detect', 'ignore_err', // 🛡️ Zwingt FFmpeg, Fehler zu ignorieren!
         '-fflags', '+genpts',        // 🛡️ Repariert kaputte Zeitstempel während der Umwandlung
@@ -11593,8 +11617,9 @@ const ThumbnailPreloader = {
     },
     extractVideoThumbnail(videoPath, thumbPath) {
         return new Promise((resolve) => {
-            if (!fs.existsSync(ffmpegPath)) {
-                if (typeof AppLogger !== 'undefined') AppLogger.warn("Preloader", `ffmpeg nicht gefunden unter: ${ffmpegPath}`);
+            const activeFfmpeg = resolveFfmpegExecutable();
+            if (!fs.existsSync(activeFfmpeg)) {
+                if (typeof AppLogger !== 'undefined') AppLogger.warn("Preloader", `ffmpeg nicht gefunden unter: ${activeFfmpeg}`);
                 return resolve(false);
             }
             const args = [
@@ -11606,7 +11631,7 @@ const ThumbnailPreloader = {
                 thumbPath,
                 "-y"
             ];
-            const proc = spawn(ffmpegPath, args);
+            const proc = spawn(activeFfmpeg, args);
             proc.on("close", (code) => {
                 if (code === 0 && fs.existsSync(thumbPath)) {
                     getThumbCacheSet().add(path.basename(thumbPath).toLowerCase());
@@ -11621,7 +11646,7 @@ const ThumbnailPreloader = {
                         thumbPath,
                         "-y"
                     ];
-                    const fbProc = spawn(ffmpegPath, fallbackArgs);
+                    const fbProc = spawn(activeFfmpeg, fallbackArgs);
                     fbProc.on("close", (fbCode) => {
                         const ok = fbCode === 0 && fs.existsSync(thumbPath);
                         if (ok) getThumbCacheSet().add(path.basename(thumbPath).toLowerCase());
@@ -14267,6 +14292,8 @@ function switchSettingsTab(tabName) {
         syncAlwaysOnTopToggleUI();
     } else if (tabName === 'tags') {
         loadTM(activeTmCategory || 'music');
+    } else if (tabName === 'updates') {
+        if (typeof window.runAppSystemCheck === 'function') window.runAppSystemCheck(true);
     }
 }
 
@@ -16944,7 +16971,9 @@ const videoTrackState = {
   probeToken: 0,
   audioSwitchToken: 0,
   pendingAudioLoad: null,
-  altAudioReady: false
+  altAudioReady: false,
+  ffmpegMissing: false,
+  bridgeError: false
 };
 
 function isAltAudioActive() {
@@ -17057,12 +17086,36 @@ function renderTracksUI() {
 
   const audioListEl = document.getElementById("audioTrackList");
   if (audioListEl) {
+    let diagBanner = null;
+    if (videoTrackState.bridgeError || videoTrackState.ffmpegMissing) {
+      diagBanner = document.createElement("div");
+      diagBanner.className = "tracks-diag-banner";
+      diagBanner.innerHTML = videoTrackState.bridgeError
+        ? `<div>⚠️ Lokaler Media-Server (Port 45678) nicht erreichbar. Spur-Analyse ist deaktiviert.</div>`
+        : `<div>⚠️ <strong>ffmpeg.exe fehlt</strong> – Tonspur-Erkennung, MKV-Audio-Wechsel &amp; interne Untertitel sind nicht verfügbar.</div>`;
+      const fixBtn = document.createElement("button");
+      fixBtn.type = "button";
+      fixBtn.className = "tracks-diag-btn";
+      fixBtn.innerText = "🩺 System-Check & Reparatur öffnen";
+      fixBtn.onclick = (e) => {
+        e.stopPropagation();
+        if (typeof window.openUpdatesSystemCheck === "function") window.openUpdatesSystemCheck();
+      };
+      diagBanner.appendChild(fixBtn);
+    }
+
     if (videoTrackState.isProbing && videoTrackState.audioTracks.length === 0) {
       audioListEl.innerHTML = `<div class="tracks-empty">Spuren werden analysiert…</div>`;
     } else if (videoTrackState.audioTracks.length === 0) {
-      audioListEl.innerHTML = `<div class="tracks-empty">Standard-Tonspur aktiv</div>`;
+      audioListEl.innerHTML = "";
+      if (diagBanner) audioListEl.appendChild(diagBanner);
+      const emptyEl = document.createElement("div");
+      emptyEl.className = "tracks-empty";
+      emptyEl.innerText = "Standard-Tonspur aktiv";
+      audioListEl.appendChild(emptyEl);
     } else {
       audioListEl.innerHTML = "";
+      if (diagBanner) audioListEl.appendChild(diagBanner);
       videoTrackState.audioTracks.forEach((tr) => {
         const btn = document.createElement("button");
         const isActive = videoTrackState.activeAudioIndex === tr.index;
@@ -17368,6 +17421,7 @@ window.probeAndLoadVideoTracks = async function(explicitPath) {
     videoTrackState.activeSubtitleKey = "off";
     videoTrackState.externalCues = [];
     videoTrackState.externalFileName = "";
+    videoTrackState.bridgeError = false;
     currentSubtitles = [];
     updateSubtitles();
   }
@@ -17385,6 +17439,8 @@ window.probeAndLoadVideoTracks = async function(explicitPath) {
 
     videoTrackState.audioTracks = Array.isArray(data.audioTracks) ? data.audioTracks : [];
     videoTrackState.subtitleTracks = Array.isArray(data.subtitleTracks) ? data.subtitleTracks : [];
+    videoTrackState.ffmpegMissing = (data.ffmpegAvailable === false);
+    videoTrackState.bridgeError = false;
     videoTrackState.isProbing = false;
 
     const saved = getSavedTrackPrefs(rawPath);
@@ -17421,6 +17477,7 @@ window.probeAndLoadVideoTracks = async function(explicitPath) {
   } catch (err) {
     if (myToken === videoTrackState.probeToken) {
       videoTrackState.isProbing = false;
+      videoTrackState.bridgeError = true;
       renderTracksUI();
     }
   }
@@ -19623,7 +19680,207 @@ function initUpdateUI() {
       }
     }).catch(() => {});
   }
+  if (typeof window.runAppSystemCheck === "function") {
+    window.runAppSystemCheck(true);
+  }
 }
+
+window.openUpdatesSystemCheck = function() {
+  if (typeof videoMenu !== "undefined" && videoMenu) videoMenu.classList.remove("show");
+  const modal = document.getElementById("settingsModal");
+  if (modal) {
+    modal.classList.remove("hidden");
+    if (typeof renderCustomThemes === "function") renderCustomThemes();
+    if (typeof updateColorPickersFromCSS === "function") updateColorPickersFromCSS();
+    if (typeof syncAlwaysOnTopToggleUI === "function") syncAlwaysOnTopToggleUI();
+  }
+  if (typeof switchSettingsTab === "function") {
+    switchSettingsTab("updates");
+  }
+  if (typeof window.runAppSystemCheck === "function") {
+    window.runAppSystemCheck(false);
+  }
+  const card = document.getElementById("updateSystemCheckCard");
+  if (card && typeof card.scrollIntoView === "function") {
+    setTimeout(() => card.scrollIntoView({ behavior: "smooth", block: "nearest" }), 80);
+  }
+};
+
+window.renderSystemCheckResults = function(res) {
+  const badge = document.getElementById("sysCheckSummaryBadge");
+  const grid = document.getElementById("sysCheckItemsGrid");
+  const meta = document.getElementById("sysCheckRuntimeMeta");
+  const pickBtn = document.getElementById("btnPickFfmpegFile");
+
+  if (!res || !Array.isArray(res.checks)) {
+    if (badge) {
+      badge.className = "sys-check-badge err";
+      badge.innerText = "Diagnose fehlgeschlagen";
+    }
+    if (grid) {
+      grid.innerHTML = `<div class="sys-check-item err"><div class="sys-check-icon">❌</div><div class="sys-check-info"><div class="sys-check-title">Media-Bridge / Diagnose nicht erreichbar</div><div class="sys-check-detail">${escapeHtmlTrack((res && res.error) || "Der lokale System-Check-Dienst hat nicht geantwortet.")}</div></div></div>`;
+    }
+    if (pickBtn) pickBtn.classList.remove("hidden");
+    return;
+  }
+
+  if (res.ffmpegPath) {
+    cachedFrontendFfmpegPath = res.ffmpegPath;
+    videoTrackState.ffmpegMissing = false;
+  } else {
+    videoTrackState.ffmpegMissing = true;
+  }
+
+  const errCount = res.checks.filter(c => c.status === "err").length;
+  const warnCount = res.checks.filter(c => c.status === "warn").length;
+
+  if (badge) {
+    if (errCount > 0) {
+      badge.className = "sys-check-badge err";
+      badge.innerText = `${errCount} Problem(e) erkannt`;
+    } else if (warnCount > 0) {
+      badge.className = "sys-check-badge warn";
+      badge.innerText = `${warnCount} Hinweis(e)`;
+    } else {
+      badge.className = "sys-check-badge ok";
+      badge.innerText = "Alles bereit (6/6)";
+    }
+  }
+
+  if (pickBtn) {
+    const ffCheck = res.checks.find(c => c.id === "ffmpeg");
+    if (!res.ffmpegPath || (ffCheck && ffCheck.status !== "ok")) {
+      pickBtn.classList.remove("hidden");
+    } else {
+      pickBtn.classList.add("hidden");
+    }
+  }
+
+  if (grid) {
+    grid.innerHTML = "";
+    res.checks.forEach(item => {
+      const st = item.status === "ok" ? "ok" : (item.status === "warn" ? "warn" : "err");
+      const icon = st === "ok" ? "✅" : (st === "warn" ? "⚠️" : "❌");
+      const el = document.createElement("div");
+      el.className = `sys-check-item ${st}`;
+      el.innerHTML = `
+        <div class="sys-check-icon">${icon}</div>
+        <div class="sys-check-info">
+          <div class="sys-check-title">${escapeHtmlTrack(item.title || item.id)}</div>
+          <div class="sys-check-detail">${escapeHtmlTrack(item.detail || "")}</div>
+        </div>
+        <span class="sys-check-badge ${st}">${escapeHtmlTrack(item.summary || st.toUpperCase())}</span>
+      `;
+      grid.appendChild(el);
+    });
+  }
+
+  if (meta) {
+    const parts = [];
+    if (res.runtimeLabel) parts.push(`Laufzeit: ${res.runtimeLabel}`);
+    if (res.appDir) parts.push(`App-Ordner: ${res.appDir}`);
+    if (res.mediaDir) parts.push(`Medien-Ordner: ${res.mediaDir}`);
+    meta.innerText = parts.join("  ·  ");
+  }
+};
+
+async function invokeSystemCheckEndpoint(endpoint, channelName, payload = {}) {
+  if (typeof ipcRenderer !== "undefined" && ipcRenderer.invoke) {
+    try {
+      const ipcRes = await ipcRenderer.invoke(channelName, payload);
+      if (ipcRes && typeof ipcRes === "object") return ipcRes;
+    } catch (e) {}
+  }
+  const resp = await fetch(`${BRIDGE_MEDIA_BASE}${endpoint}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload || {})
+  });
+  if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+  return await resp.json();
+}
+
+window.runAppSystemCheck = async function(silent = true) {
+  const btn = document.getElementById("btnRunSysCheck");
+  const badge = document.getElementById("sysCheckSummaryBadge");
+  if (btn) btn.disabled = true;
+  if (badge && !silent) {
+    badge.className = "sys-check-badge";
+    badge.innerText = "Prüfe…";
+  }
+  try {
+    const res = await invokeSystemCheckEndpoint("/api/system-check", "run-system-check", {});
+    window.renderSystemCheckResults(res);
+    if (!silent && typeof showVideoToast === "function") {
+      if (res && res.allReady) {
+        showVideoToast("✅ System-Check: Alle 6 Funktionsbereiche sind bereit!");
+      } else {
+        showVideoToast("⚠️ System-Check: Bitte Hinweise im Updater prüfen.");
+      }
+    }
+    return res;
+  } catch (err) {
+    window.renderSystemCheckResults({ ok: false, error: err.message, checks: null });
+    if (!silent && typeof showVideoToast === "function") {
+      showVideoToast("❌ System-Check fehlgeschlagen: " + err.message);
+    }
+    return null;
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+};
+
+window.runAppSystemRepair = async function() {
+  const btn = document.getElementById("btnRepairSysCheck");
+  const badge = document.getElementById("sysCheckSummaryBadge");
+  if (btn) btn.disabled = true;
+  if (badge) {
+    badge.className = "sys-check-badge";
+    badge.innerText = "Repariere…";
+  }
+  try {
+    const res = await invokeSystemCheckEndpoint("/api/system-repair", "run-system-repair", {});
+    window.renderSystemCheckResults(res);
+    const actions = Array.isArray(res && res.repairedActions) ? res.repairedActions : [];
+    if (typeof showVideoToast === "function") {
+      if (actions.length > 0) {
+        showVideoToast(`🔧 Repariert (${actions.length}): ${actions[0]}`);
+      } else if (res && res.allReady) {
+        showVideoToast("✅ Alles bereits in Ordnung – Caches & Pfade aktualisiert.");
+      } else {
+        showVideoToast("⚠️ Konnte nicht alle Probleme automatisch lösen (z. B. fehlende ffmpeg.exe).");
+      }
+    }
+    if (videoTrackState && videoTrackState.mediaPath && typeof window.probeAndLoadVideoTracks === "function") {
+      window.probeAndLoadVideoTracks(videoTrackState.mediaPath);
+    }
+    return res;
+  } catch (err) {
+    if (typeof showVideoToast === "function") {
+      showVideoToast("❌ Reparatur fehlgeschlagen: " + err.message);
+    }
+    return null;
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+};
+
+window.pickAndInstallFfmpeg = async function() {
+  try {
+    const res = await ipcRenderer.invoke("pick-ffmpeg-file");
+    if (!res || res.canceled) return;
+    if (!res.success) {
+      alert("FFmpeg konnte nicht installiert werden: " + (res.error || "Unbekannter Fehler"));
+      return;
+    }
+    if (typeof showVideoToast === "function") {
+      showVideoToast(`✅ ffmpeg.exe installiert nach ${res.installedTo || "media\\video\\ffmpeg.exe"}`);
+    }
+    await window.runAppSystemRepair();
+  } catch (err) {
+    alert("Fehler beim Auswählen von ffmpeg.exe: " + err.message);
+  }
+};
 
 window.manualCheckAppUpdate = async function(isSilentStartup = false) {
   const btn = document.getElementById("btnCheckAppUpdate");
@@ -19637,6 +19894,9 @@ window.manualCheckAppUpdate = async function(isSilentStartup = false) {
   if (text) text.innerText = "Prüfe...";
 
   try {
+    if (typeof window.runAppSystemCheck === "function") {
+      window.runAppSystemCheck(true);
+    }
     const repo = getUpdateRepo();
     const token = getUpdateToken();
     const res = await ipcRenderer.invoke("check-app-update", { repo, token });

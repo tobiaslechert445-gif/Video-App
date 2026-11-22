@@ -201,6 +201,7 @@ static AUDIO_EXTRACT_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 static SUB_EXTRACT_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 static PLAYABLE_PATH_CACHE: OnceLock<Mutex<HashMap<String, PathBuf>>> = OnceLock::new();
 static PROBE_TRACKS_CACHE: OnceLock<Mutex<HashMap<String, ProbedTracks>>> = OnceLock::new();
+static FFMPEG_PATH_CACHE: OnceLock<Mutex<Option<PathBuf>>> = OnceLock::new();
 
 fn fnv1a_64(data: &[u8]) -> u64 {
     let mut hash: u64 = 0xcbf29ce484222325;
@@ -211,20 +212,119 @@ fn fnv1a_64(data: &[u8]) -> u64 {
     hash
 }
 
-fn find_ffmpeg(media_dir: &Path) -> Option<PathBuf> {
-    let bundled = media_dir.join("video").join("ffmpeg.exe");
-    if bundled.is_file() {
-        return Some(bundled);
+fn clear_ffmpeg_and_probe_caches() {
+    if let Some(cache) = FFMPEG_PATH_CACHE.get() {
+        if let Ok(mut guard) = cache.lock() {
+            *guard = None;
+        }
     }
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(dir) = exe.parent() {
-            let local = dir.join("ffmpeg.exe");
-            if local.is_file() {
-                return Some(local);
+    if let Some(cache) = PROBE_TRACKS_CACHE.get() {
+        if let Ok(mut map) = cache.lock() {
+            map.clear();
+        }
+    }
+}
+
+fn find_ffmpeg(media_dir: &Path) -> Option<PathBuf> {
+    let cache = FFMPEG_PATH_CACHE.get_or_init(|| Mutex::new(None));
+    if let Ok(guard) = cache.lock() {
+        if let Some(ref cached) = *guard {
+            if cached.is_file() {
+                return Some(cached.clone());
             }
         }
     }
-    None
+
+    let mut candidates: Vec<PathBuf> = vec![
+        media_dir.join("video").join("ffmpeg.exe"),
+        media_dir.join("ffmpeg.exe"),
+    ];
+
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(exe_dir) = exe.parent() {
+            candidates.push(exe_dir.join("ffmpeg.exe"));
+            candidates.push(exe_dir.join("media").join("video").join("ffmpeg.exe"));
+            let mut cur = exe_dir.to_path_buf();
+            for _ in 0..4 {
+                candidates.push(cur.join("media").join("video").join("ffmpeg.exe"));
+                candidates.push(cur.join("ffmpeg.exe"));
+                candidates.push(
+                    cur.join("My_View_Starter_Template")
+                        .join("media")
+                        .join("video")
+                        .join("ffmpeg.exe"),
+                );
+                let Some(parent) = cur.parent() else {
+                    break;
+                };
+                cur = parent.to_path_buf();
+            }
+        }
+    }
+
+    let mut cur_media = media_dir.to_path_buf();
+    for _ in 0..4 {
+        candidates.push(cur_media.join("media").join("video").join("ffmpeg.exe"));
+        candidates.push(cur_media.join("ffmpeg.exe"));
+        candidates.push(
+            cur_media
+                .join("My_View_Starter_Template")
+                .join("media")
+                .join("video")
+                .join("ffmpeg.exe"),
+        );
+        let Some(parent) = cur_media.parent() else {
+            break;
+        };
+        cur_media = parent.to_path_buf();
+    }
+
+    if let Ok(profile) = std::env::var("USERPROFILE") {
+        let home = PathBuf::from(profile);
+        for sub in ["Downloads", "Desktop", "Documents"] {
+            let base = home.join(sub);
+            candidates.push(base.join("ffmpeg.exe"));
+            candidates.push(
+                base.join("My_View_Starter_Template")
+                    .join("media")
+                    .join("video")
+                    .join("ffmpeg.exe"),
+            );
+            candidates.push(
+                base.join("My_Media_App")
+                    .join("media")
+                    .join("video")
+                    .join("ffmpeg.exe"),
+            );
+        }
+    }
+
+    let mut found: Option<PathBuf> = candidates.into_iter().find(|p| p.is_file());
+
+    if found.is_none() {
+        let mut cmd = Command::new("where.exe");
+        cmd.arg("ffmpeg");
+        #[cfg(target_os = "windows")]
+        cmd.creation_flags(CREATE_NO_WINDOW);
+        if let Ok(out) = cmd.output() {
+            if out.status.success() {
+                for line in String::from_utf8_lossy(&out.stdout).lines() {
+                    let p = PathBuf::from(line.trim());
+                    if p.is_file() {
+                        found = Some(p);
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    if let Some(ref p) = found {
+        if let Ok(mut guard) = cache.lock() {
+            *guard = Some(p.clone());
+        }
+    }
+    found
 }
 
 fn normalize_path_key(p: &Path) -> String {
@@ -1381,6 +1481,7 @@ fn handle_media_tracks_api(req: Request, body: Value) {
             "ok": true,
             "path": raw_path,
             "resolvedPath": primary.to_string_lossy().to_string(),
+            "ffmpegAvailable": find_ffmpeg(&media_dir).is_some(),
             "audioTracks": probed.audio,
             "subtitleTracks": probed.subtitles
         }),
@@ -1915,6 +2016,48 @@ fn handle_dialog_api(req: Request, body: Value) {
                             "originalName": original_name
                         }),
                     );
+                }
+                None => respond_json(req, 200, json!({ "success": false, "canceled": true })),
+            }
+        }
+        "openFfmpeg" => {
+            let file = rfd::FileDialog::new()
+                .set_title("ffmpeg.exe auswählen")
+                .add_filter("FFmpeg Executable", &["exe"])
+                .pick_file();
+            match file {
+                Some(p) => {
+                    let (_app_dir, media_dir, _exe, _pkg) = resolve_app_paths();
+                    let target_dir = media_dir.join("video");
+                    let _ = fs::create_dir_all(&target_dir);
+                    let dest = target_dir.join("ffmpeg.exe");
+                    let copy_res = if p.to_string_lossy().eq_ignore_ascii_case(&dest.to_string_lossy()) {
+                        Ok(0)
+                    } else {
+                        fs::copy(&p, &dest)
+                    };
+                    clear_ffmpeg_and_probe_caches();
+                    match copy_res {
+                        Ok(_) => respond_json(
+                            req,
+                            200,
+                            json!({
+                                "success": true,
+                                "canceled": false,
+                                "filePath": p.to_string_lossy().to_string(),
+                                "installedTo": dest.to_string_lossy().to_string()
+                            }),
+                        ),
+                        Err(e) => respond_json(
+                            req,
+                            200,
+                            json!({
+                                "success": false,
+                                "canceled": false,
+                                "error": format!("Konnte ffmpeg.exe nicht kopieren: {}", e)
+                            }),
+                        ),
+                    }
                 }
                 None => respond_json(req, 200, json!({ "success": false, "canceled": true })),
             }
@@ -2798,6 +2941,355 @@ fn handle_updater_api(req: Request, app: &AppHandle, body: Value) {
     }
 }
 
+fn build_system_check_payload(app: &AppHandle) -> Value {
+    let (app_dir, media_dir, exe_path, is_packaged) = resolve_app_paths();
+    let version = app.package_info().version.to_string();
+    let bundled_ffmpeg = media_dir.join("video").join("ffmpeg.exe");
+    let ffmpeg_opt = find_ffmpeg(&media_dir);
+    let ffmpeg_bundled = bundled_ffmpeg.is_file();
+
+    // 1. Bridge check
+    let check_bridge = json!({
+        "id": "bridge",
+        "title": "Media-Bridge & Multi-Track-Server",
+        "status": "ok",
+        "summary": "Aktiv (Port 45678)",
+        "detail": format!("Laufzeit: Tauri Native (my_view_app.exe v{}) – Streaming, Tonspur-Wechsel & Untertitel-Extraktion aktiv.", version)
+    });
+
+    // 2. FFmpeg check
+    let mut ffmpeg_version_line = String::new();
+    let mut ffmpeg_exec_ok = false;
+    if let Some(ref ff) = ffmpeg_opt {
+        let mut cmd = Command::new(ff);
+        cmd.arg("-version");
+        #[cfg(target_os = "windows")]
+        cmd.creation_flags(CREATE_NO_WINDOW);
+        if let Ok(out) = cmd.output() {
+            if out.status.success() {
+                ffmpeg_exec_ok = true;
+                ffmpeg_version_line = String::from_utf8_lossy(&out.stdout)
+                    .lines()
+                    .next()
+                    .unwrap_or("")
+                    .trim()
+                    .to_string();
+            }
+        }
+    }
+    let check_ffmpeg = match (&ffmpeg_opt, ffmpeg_exec_ok, ffmpeg_bundled) {
+        (Some(ff), true, true) => json!({
+            "id": "ffmpeg",
+            "title": "FFmpeg-Engine (MKV, Tonspuren & Thumbnails)",
+            "status": "ok",
+            "summary": "Bereit (im App-Ordner)",
+            "detail": format!("{} ({})", ff.to_string_lossy(), ffmpeg_version_line)
+        }),
+        (Some(ff), true, false) => json!({
+            "id": "ffmpeg",
+            "title": "FFmpeg-Engine (MKV, Tonspuren & Thumbnails)",
+            "status": "warn",
+            "summary": "Extern gefunden",
+            "detail": format!("Gefunden unter {} – 'Automatisch reparieren' kopiert ffmpeg.exe fest nach media\\video\\ffmpeg.exe.", ff.to_string_lossy())
+        }),
+        (Some(ff), false, _) => json!({
+            "id": "ffmpeg",
+            "title": "FFmpeg-Engine (MKV, Tonspuren & Thumbnails)",
+            "status": "err",
+            "summary": "Nicht ausführbar",
+            "detail": format!("Datei gefunden unter {}, konnte aber nicht gestartet werden.", ff.to_string_lossy())
+        }),
+        (None, _, _) => json!({
+            "id": "ffmpeg",
+            "title": "FFmpeg-Engine (MKV, Tonspuren & Thumbnails)",
+            "status": "err",
+            "summary": "Fehlt",
+            "detail": format!("ffmpeg.exe nicht gefunden (erwartet unter {}). Multi-Audio, MKV-Konvertierung und Video-Thumbnails sind ohne FFmpeg nicht verfügbar.", bundled_ffmpeg.to_string_lossy())
+        }),
+    };
+
+    // 3. Codecs check
+    let mut supported_codecs: Vec<String> = Vec::new();
+    let expected_codecs = ["aac", "dca", "ac3", "eac3", "subrip", "webvtt"];
+    if let Some(ref ff) = ffmpeg_opt {
+        if ffmpeg_exec_ok {
+            let mut cmd = Command::new(ff);
+            cmd.args(["-hide_banner", "-codecs"]);
+            #[cfg(target_os = "windows")]
+            cmd.creation_flags(CREATE_NO_WINDOW);
+            if let Ok(out) = cmd.output() {
+                if out.status.success() {
+                    let stdout_lower = String::from_utf8_lossy(&out.stdout).to_lowercase();
+                    for c in expected_codecs {
+                        if stdout_lower.contains(c) {
+                            supported_codecs.push(c.to_string());
+                        }
+                    }
+                }
+            }
+        }
+    }
+    let has_core_codecs = supported_codecs.iter().any(|c| c == "aac")
+        && supported_codecs.iter().any(|c| c == "dca")
+        && supported_codecs.iter().any(|c| c == "webvtt");
+    let check_codecs = if ffmpeg_opt.is_none() || !ffmpeg_exec_ok {
+        json!({
+            "id": "codecs",
+            "title": "Audio- & Untertitel-Codecs (AAC, DTS, AC3, WebVTT)",
+            "status": "err",
+            "summary": "Nicht prüfbar",
+            "detail": "FFmpeg erforderlich, um DTS/AC3/E-AC3 zu decodieren und WebVTT/SRT-Untertitel zu extrahieren."
+        })
+    } else if supported_codecs.len() == expected_codecs.len() {
+        json!({
+            "id": "codecs",
+            "title": "Audio- & Untertitel-Codecs (AAC, DTS, AC3, WebVTT)",
+            "status": "ok",
+            "summary": format!("{}/{} Codecs aktiv", supported_codecs.len(), expected_codecs.len()),
+            "detail": format!("Aktiv: {} – DTS, AC3, E-AC3, AAC sowie MKV-Untertitel (SRT/ASS/WebVTT) werden voll unterstützt.", supported_codecs.join(", ").to_uppercase())
+        })
+    } else if has_core_codecs {
+        json!({
+            "id": "codecs",
+            "title": "Audio- & Untertitel-Codecs (AAC, DTS, AC3, WebVTT)",
+            "status": "warn",
+            "summary": format!("{}/{} Codecs aktiv", supported_codecs.len(), expected_codecs.len()),
+            "detail": format!("Erkannt: {}", supported_codecs.join(", ").to_uppercase())
+        })
+    } else {
+        json!({
+            "id": "codecs",
+            "title": "Audio- & Untertitel-Codecs (AAC, DTS, AC3, WebVTT)",
+            "status": "err",
+            "summary": "Eingeschränkt",
+            "detail": "Wichtige Codecs (AAC/DTS/WebVTT) fehlen in der verwendeten ffmpeg.exe."
+        })
+    };
+
+    // 4. Folders & write permissions check
+    let required_dirs = [
+        media_dir.clone(),
+        media_dir.join("video"),
+        media_dir.join("music"),
+        media_dir.join("covers"),
+        media_dir.join(".mkv_cache"),
+        media_dir.join(".sub_cache"),
+    ];
+    let mut folder_errors: Vec<String> = Vec::new();
+    for dir in &required_dirs {
+        if let Err(e) = fs::create_dir_all(dir) {
+            folder_errors.push(format!("{}: {}", dir.to_string_lossy(), e));
+            continue;
+        }
+        let probe_file = dir.join(".write_test");
+        match fs::write(&probe_file, b"ok") {
+            Ok(_) => {
+                let _ = fs::remove_file(&probe_file);
+            }
+            Err(e) => {
+                folder_errors.push(format!("{} (nicht beschreibbar: {})", dir.to_string_lossy(), e));
+            }
+        }
+    }
+    let check_folders = if folder_errors.is_empty() {
+        json!({
+            "id": "folders",
+            "title": "Medien- & Cache-Ordner (.mkv_cache, .sub_cache)",
+            "status": "ok",
+            "summary": "Alle 6 Ordner beschreibbar",
+            "detail": format!("Medienbasis: {}", media_dir.to_string_lossy())
+        })
+    } else {
+        json!({
+            "id": "folders",
+            "title": "Medien- & Cache-Ordner (.mkv_cache, .sub_cache)",
+            "status": "err",
+            "summary": format!("{} Problem(e)", folder_errors.len()),
+            "detail": folder_errors.join(" | ")
+        })
+    };
+
+    // 5. Studio assets check (fonts & cursor presets)
+    let font_count = fs::read_dir(media_dir.join("fonts"))
+        .ok()
+        .map(|rd| {
+            rd.flatten()
+                .filter(|e| {
+                    let n = e.file_name().to_string_lossy().to_lowercase();
+                    n.ends_with(".ttf") || n.ends_with(".otf")
+                })
+                .count()
+        })
+        .unwrap_or(0);
+    let preset_count = fs::read_dir(media_dir.join("presets"))
+        .ok()
+        .map(|rd| {
+            rd.flatten()
+                .filter(|e| e.file_name().to_string_lossy().to_lowercase().ends_with(".png"))
+                .count()
+        })
+        .unwrap_or(0);
+    let check_assets = if font_count > 0 && preset_count > 0 {
+        json!({
+            "id": "assets",
+            "title": "Zeichenstudio, Equalizer & Oberfläche",
+            "status": "ok",
+            "summary": format!("{} Fonts · {} Presets", font_count, preset_count),
+            "detail": "Schriftarten, Cursor-Presets sowie AudioContext-Equalizer sind einsatzbereit."
+        })
+    } else {
+        json!({
+            "id": "assets",
+            "title": "Zeichenstudio, Equalizer & Oberfläche",
+            "status": "warn",
+            "summary": format!("{} Fonts · {} Presets", font_count, preset_count),
+            "detail": "Einige Font- oder Preset-Ressourcen in media\\fonts / media\\presets fehlen (Standard-Fallbacks aktiv)."
+        })
+    };
+
+    // 6. Updater / curl.exe check
+    let mut curl_cmd = Command::new("curl.exe");
+    curl_cmd.arg("--version");
+    #[cfg(target_os = "windows")]
+    curl_cmd.creation_flags(CREATE_NO_WINDOW);
+    let check_updater = match curl_cmd.output() {
+        Ok(out) if out.status.success() => {
+            let line = String::from_utf8_lossy(&out.stdout)
+                .lines()
+                .next()
+                .unwrap_or("curl.exe verfügbar")
+                .trim()
+                .to_string();
+            json!({
+                "id": "updater",
+                "title": "Online-Updater & Netzwerk-Download",
+                "status": "ok",
+                "summary": "Bereit",
+                "detail": line
+            })
+        }
+        _ => json!({
+            "id": "updater",
+            "title": "Online-Updater & Netzwerk-Download",
+            "status": "err",
+            "summary": "curl.exe fehlt",
+            "detail": "Windows curl.exe konnte nicht ausgeführt werden."
+        }),
+    };
+
+    let checks = vec![
+        check_bridge,
+        check_ffmpeg,
+        check_codecs,
+        check_folders,
+        check_assets,
+        check_updater,
+    ];
+    let all_ready = checks
+        .iter()
+        .all(|c| c.get("status").and_then(|s| s.as_str()) == Some("ok"));
+
+    json!({
+        "ok": true,
+        "allReady": all_ready,
+        "runtime": "tauri",
+        "runtimeLabel": "Tauri Native (my_view_app.exe)",
+        "version": version,
+        "isPackaged": is_packaged,
+        "appDir": app_dir.to_string_lossy().to_string(),
+        "mediaDir": media_dir.to_string_lossy().to_string(),
+        "exePath": exe_path.to_string_lossy().to_string(),
+        "ffmpegPath": ffmpeg_opt.as_ref().map(|p| p.to_string_lossy().to_string()),
+        "ffmpegBundled": ffmpeg_bundled,
+        "supportedCodecs": supported_codecs,
+        "checks": checks
+    })
+}
+
+fn handle_system_check_api(req: Request, app: &AppHandle) {
+    let payload = build_system_check_payload(app);
+    respond_json(req, 200, payload);
+}
+
+fn handle_system_repair_api(req: Request, app: &AppHandle, body: Value) {
+    let (_app_dir, media_dir, _exe_path, _pkg) = resolve_app_paths();
+    let mut repaired_actions: Vec<String> = Vec::new();
+
+    for sub in [
+        "video",
+        "music",
+        "covers",
+        "snapshots",
+        "references",
+        "logo",
+        "cursor",
+        "fonts",
+        "presets",
+        ".mkv_cache",
+        ".sub_cache",
+    ] {
+        let dir = media_dir.join(sub);
+        if !dir.is_dir() && fs::create_dir_all(&dir).is_ok() {
+            repaired_actions.push(format!("Ordner erstellt: {}", dir.to_string_lossy()));
+        }
+    }
+
+    clear_ffmpeg_and_probe_caches();
+    let dest_ffmpeg = media_dir.join("video").join("ffmpeg.exe");
+    let custom_ffmpeg = body
+        .get("customFfmpegPath")
+        .and_then(|v| v.as_str())
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .map(PathBuf::from);
+
+    if let Some(src) = custom_ffmpeg {
+        if src.is_file() && !src.to_string_lossy().eq_ignore_ascii_case(&dest_ffmpeg.to_string_lossy()) {
+            if fs::copy(&src, &dest_ffmpeg).is_ok() {
+                repaired_actions.push(format!(
+                    "FFmpeg von {} nach {} installiert",
+                    src.to_string_lossy(),
+                    dest_ffmpeg.to_string_lossy()
+                ));
+            }
+        }
+    } else if !dest_ffmpeg.is_file() {
+        if let Some(found) = find_ffmpeg(&media_dir) {
+            if !found.to_string_lossy().eq_ignore_ascii_case(&dest_ffmpeg.to_string_lossy()) {
+                if fs::copy(&found, &dest_ffmpeg).is_ok() {
+                    repaired_actions.push(format!(
+                        "FFmpeg automatisch von {} nach {} kopiert",
+                        found.to_string_lossy(),
+                        dest_ffmpeg.to_string_lossy()
+                    ));
+                }
+            }
+        }
+    }
+
+    for cache_sub in [".mkv_cache", ".sub_cache"] {
+        let dir = media_dir.join(cache_sub);
+        if let Ok(entries) = fs::read_dir(&dir) {
+            for entry in entries.flatten() {
+                let p = entry.path();
+                if p.is_file() {
+                    let name = entry.file_name().to_string_lossy().to_lowercase();
+                    if name.contains(".tmp.") && fs::remove_file(&p).is_ok() {
+                        repaired_actions.push(format!("Verwaiste Temp-Datei bereinigt: {}", name));
+                    }
+                }
+            }
+        }
+    }
+
+    clear_ffmpeg_and_probe_caches();
+    let mut payload = build_system_check_payload(app);
+    if let Some(obj) = payload.as_object_mut() {
+        obj.insert("repairedActions".to_string(), json!(repaired_actions));
+    }
+    respond_json(req, 200, payload);
+}
+
 fn start_bridge_server(app: AppHandle) {
     thread::spawn(move || {
         let addr = format!("127.0.0.1:{}", STREAM_BRIDGE_PORT);
@@ -2932,6 +3424,14 @@ fn start_bridge_server(app: AppHandle) {
                 }
                 "/api/media/extract_subtitles" => {
                     thread::spawn(move || handle_extract_subtitles_api(req, body));
+                }
+                "/api/system-check" => {
+                    let app_c = app.clone();
+                    thread::spawn(move || handle_system_check_api(req, &app_c));
+                }
+                "/api/system-repair" => {
+                    let app_c = app.clone();
+                    thread::spawn(move || handle_system_repair_api(req, &app_c, body));
                 }
                 _ => respond_json(req, 404, json!({ "error": "Not Found" })),
             }
