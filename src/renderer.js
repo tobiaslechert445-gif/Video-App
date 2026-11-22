@@ -178,6 +178,7 @@ const videoList = document.getElementById("videoList");
 const likedGrid = document.getElementById("likedGrid");
 const player = document.getElementById("audioPlayer");
 const videoPlayer = document.getElementById("videoPlayer");
+const videoAltAudio = document.getElementById("videoAltAudio");
 const progressBar = document.getElementById("progressBar");
 const shuffleBtn = document.getElementById("shuffleBtn");
 const volume = document.getElementById("volume");
@@ -1010,8 +1011,7 @@ if(menuBtn){
   menuBtn.addEventListener("click",(e)=>{
     e.stopPropagation()
 
-    document.getElementById("menuMain").classList.remove("hidden")
-    document.getElementById("speedPanel").classList.add("hidden")
+    if (typeof backToMenu === "function") backToMenu();
 
     videoMenu.classList.toggle("show")
   })
@@ -1019,7 +1019,7 @@ if(menuBtn){
 
 document.addEventListener("click",(e)=>{
 
-if(!videoMenu.contains(e.target) && e.target !== menuBtn && !(e.target.closest && e.target.closest('#fsMenuBtn'))){
+if(!videoMenu.contains(e.target) && e.target !== menuBtn && !(e.target.closest && (e.target.closest('#fsMenuBtn') || e.target.closest('#tracksQuickBtn') || e.target.closest('#fsTracksBtn')))){
 
 videoMenu.classList.remove("show")
 
@@ -1769,6 +1769,29 @@ function updateLibraryAfterMkvConversion(fullMkvPath, fullMp4Path) {
     } catch (e) {}
 }
 
+function preserveMkvSubtitlesBeforeDelete(mkvPath, done) {
+    const finish = typeof done === "function" ? done : () => {};
+    if (!mkvPath || typeof fetch !== "function") {
+        finish();
+        return;
+    }
+    let settled = false;
+    const safeDone = () => {
+        if (settled) return;
+        settled = true;
+        finish();
+    };
+    const timer = setTimeout(safeDone, 12000);
+    fetch("http://127.0.0.1:45678/api/media/extract_subtitles", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ path: mkvPath })
+    }).catch(() => {}).finally(() => {
+        clearTimeout(timer);
+        safeDone();
+    });
+}
+
 function runNextMkvConversion() {
     if (conversionQueue.length === 0) {
         isConverting = false;
@@ -1822,9 +1845,12 @@ function runNextMkvConversion() {
         if (validMp4) {
             updateLibraryAfterMkvConversion(fullMkvPath, fullMp4Path);
             if (getKeepOriginalMkv()) {
+                preserveMkvSubtitlesBeforeDelete(fullMkvPath);
                 runNextMkvConversion();
             } else {
-                deleteMkvFile(fullMkvPath, runNextMkvConversion);
+                preserveMkvSubtitlesBeforeDelete(fullMkvPath, () => {
+                    deleteMkvFile(fullMkvPath, runNextMkvConversion);
+                });
             }
             return;
         }
@@ -1845,7 +1871,8 @@ function runNextMkvConversion() {
         '-fflags', '+genpts',        // 🛡️ Repariert kaputte Zeitstempel während der Umwandlung
         '-i', fullMkvPath,
         '-map', '0:v:0',
-        '-map', '0:a:0?',
+        '-map', '0:a?',
+        '-map_metadata', '0',
         '-c:v', 'copy',
         '-c:a', 'aac',
         '-b:a', '256k',
@@ -1911,9 +1938,12 @@ function runNextMkvConversion() {
             updateConvertUI();
             updateLibraryAfterMkvConversion(fullMkvPath, fullMp4Path);
             if (getKeepOriginalMkv()) {
+                preserveMkvSubtitlesBeforeDelete(fullMkvPath);
                 runNextMkvConversion();
             } else {
-                deleteMkvFile(fullMkvPath, runNextMkvConversion);
+                preserveMkvSubtitlesBeforeDelete(fullMkvPath, () => {
+                    deleteMkvFile(fullMkvPath, runNextMkvConversion);
+                });
             }
         } else {
             console.error(`Fehler! Umwandlung bei ${currentConvData.progress.toFixed(1)}% gestoppt.`);
@@ -2593,10 +2623,7 @@ window.toggleFullscreenPlayPause = toggleFullscreenPlayPause;
   if (fsMenuBtn && videoMenuEl) {
     fsMenuBtn.addEventListener("click", (e) => {
       e.stopPropagation();
-      const menuMain = document.getElementById("menuMain");
-      const speedPanel = document.getElementById("speedPanel");
-      if (menuMain) menuMain.classList.remove("hidden");
-      if (speedPanel) speedPanel.classList.add("hidden");
+      if (typeof backToMenu === "function") backToMenu();
       videoMenuEl.classList.toggle("show");
       wakeFullscreenHud();
     });
@@ -2712,12 +2739,14 @@ function backToMenu(){
   const sync = document.getElementById("syncPanel");
   const adj = document.getElementById("videoAdjustPanel");
   const eq = document.getElementById("equalizerPanel");
+  const tracks = document.getElementById("tracksPanel");
 
   if (speed) speed.classList.add("hidden");
   if (timer) timer.classList.add("hidden");
   if (sync) sync.classList.add("hidden");
   if (adj) adj.classList.add("hidden");
   if (eq) eq.classList.add("hidden");
+  if (tracks) tracks.classList.add("hidden");
   if (main) main.classList.remove("hidden");
 }
 
@@ -2812,6 +2841,7 @@ function updateVideoControls() {
     const stepBack = document.getElementById("stepBackBtn");
     const stepFwd = document.getElementById("stepForwardBtn");
     const snap = document.getElementById("snapshotBtn");
+    const tracksBtn = document.getElementById("tracksQuickBtn");
     const videoToolsGroup = document.getElementById("videoToolsGroup");
 
     // Effekt- & Optionen-Menü (Equalizer, Speed, Sleep-Timer, Hilfe) bleibt für Musik & Video nutzbar
@@ -2827,6 +2857,7 @@ function updateVideoControls() {
         if (stepBack) { stepBack.classList.remove("hidden"); stepBack.style.display = ""; }
         if (stepFwd) { stepFwd.classList.remove("hidden"); stepFwd.style.display = ""; }
         if (snap) { snap.classList.remove("hidden"); snap.style.display = ""; }
+        if (tracksBtn) { tracksBtn.classList.remove("hidden"); tracksBtn.style.display = ""; }
     } else {
         if (videoToolsGroup) { videoToolsGroup.classList.add("hidden"); videoToolsGroup.style.display = "none"; }
         if (fullscreenBtn) { fullscreenBtn.classList.add("hidden"); fullscreenBtn.style.display = "none"; }
@@ -2834,6 +2865,7 @@ function updateVideoControls() {
         if (stepBack) { stepBack.classList.add("hidden"); stepBack.style.display = "none"; }
         if (stepFwd) { stepFwd.classList.add("hidden"); stepFwd.style.display = "none"; }
         if (snap) { snap.classList.add("hidden"); snap.style.display = "none"; }
+        if (tracksBtn) { tracksBtn.classList.add("hidden"); tracksBtn.style.display = "none"; }
     }
 }
 
@@ -2902,6 +2934,9 @@ const videoFilters = eqBands.map(freq => {
 
 const musicSource = audioCtx.createMediaElementSource(player)
 const videoSource = audioCtx.createMediaElementSource(videoPlayer)
+const videoAltAudioSource = (videoAltAudio && typeof audioCtx.createMediaElementSource === "function")
+    ? audioCtx.createMediaElementSource(videoAltAudio)
+    : null;
 
 // --- MISCHPULT AUDIO NODES SETUP ---
 // 1. Preamp Nodes
@@ -2967,6 +3002,9 @@ videoFilters.forEach(filter => {
     currentVideoNode.connect(filter);
     currentVideoNode = filter;
 });
+if (videoAltAudioSource && videoFilters.length > 0) {
+    videoAltAudioSource.connect(videoFilters[0]);
+}
 currentVideoNode.connect(videoPanner);
 videoPanner.connect(videoPreamp);
 
@@ -4270,6 +4308,9 @@ function applyAppVolume(rawVal) {
   const elementVol = Math.min(1.0, val);
   player.volume = elementVol;
   videoPlayer.volume = elementVol;
+  if (typeof videoAltAudio !== "undefined" && videoAltAudio) {
+    videoAltAudio.volume = elementVol;
+  }
 
   // Web Audio preamp gain handles overboost from 1.0 up to 1.5
   const boostGain = Math.max(1.0, val);
@@ -16574,6 +16615,8 @@ let currentSubtitles = [];
 window.showSyncPanel = function() {
   const main = document.getElementById("menuMain");
   const sync = document.getElementById("syncPanel");
+  const tracks = document.getElementById("tracksPanel");
+  if (tracks) tracks.classList.add("hidden");
   if (main) main.classList.add("hidden");
   if (sync) sync.classList.remove("hidden");
 };
@@ -16639,12 +16682,15 @@ document.getElementById("subtitleDelaySlider")?.addEventListener("input", (e) =>
 
 function parseSubtitles(text) {
   const cues = [];
-  const normalized = text.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+  if (!text || typeof text !== "string") return cues;
+  const normalized = text.replace(/^\uFEFF/, '').replace(/\r\n/g, '\n').replace(/\r/g, '\n');
   const blocks = normalized.split(/\n\n+/);
 
   for (const block of blocks) {
     const lines = block.trim().split('\n');
     if (lines.length < 2) continue;
+    const head = lines[0].trim();
+    if (/^(WEBVTT|NOTE|STYLE|REGION)(\s|$)/i.test(head) && !lines.some(l => l.includes('-->'))) continue;
 
     let timeLineIdx = -1;
     for (let i = 0; i < lines.length; i++) {
@@ -16668,12 +16714,19 @@ function parseSubtitles(text) {
 
     const start = parseTime(timeMatch[1], timeMatch[2], timeMatch[3], timeMatch[4]);
     const end = parseTime(timeMatch[5], timeMatch[6], timeMatch[7], timeMatch[8]);
-    const textContent = lines.slice(timeLineIdx + 1).join('\n').replace(/<[^>]*>/g, '').trim();
+    const textContent = lines
+      .slice(timeLineIdx + 1)
+      .join('\n')
+      .replace(/\{\\[^}]*\}/g, '')
+      .replace(/<[^>]*>/g, '')
+      .replace(/\\N/gi, '\n')
+      .trim();
 
     if (textContent) {
       cues.push({ start, end, text: textContent });
     }
   }
+  cues.sort((a, b) => a.start - b.start);
   return cues;
 }
 
@@ -16702,6 +16755,686 @@ function updateSubtitles() {
   }
 }
 
+// ============================================================
+// TONSPUR- & UNTERTITEL-MANAGER (MKV/MP4 MULTI-TRACK)
+// ============================================================
+const BRIDGE_MEDIA_BASE = "http://127.0.0.1:45678";
+const AUTO_SUBS_STORAGE_KEY = "myview_auto_embedded_subs";
+const TRACK_PREFS_STORAGE_KEY = "myview_video_track_prefs";
+
+function getAutoEmbeddedSubtitles() {
+  try {
+    const v = localStorage.getItem(AUTO_SUBS_STORAGE_KEY);
+    return v === null ? true : v === "1";
+  } catch (e) {
+    return true;
+  }
+}
+
+function setAutoEmbeddedSubtitles(enabled) {
+  try {
+    localStorage.setItem(AUTO_SUBS_STORAGE_KEY, enabled ? "1" : "0");
+  } catch (e) {}
+}
+
+function loadVideoTrackPrefsMap() {
+  try {
+    const raw = localStorage.getItem(TRACK_PREFS_STORAGE_KEY);
+    return raw ? JSON.parse(raw) : {};
+  } catch (e) {
+    return {};
+  }
+}
+
+function getMediaStemPrefKey(rawPath) {
+  if (!rawPath || typeof rawPath !== "string") return "";
+  const norm = rawPath.replace(/\//g, "\\").trim().toLowerCase();
+  return norm.replace(/\.(mkv|mp4|m4v|webm|avi|mov|flv|ogv)$/i, "");
+}
+
+function getSavedTrackPrefs(rawPath) {
+  const key = getMediaStemPrefKey(rawPath);
+  if (!key) return null;
+  const map = loadVideoTrackPrefsMap();
+  return map[key] || null;
+}
+
+function saveTrackPrefs(rawPath, patch) {
+  const key = getMediaStemPrefKey(rawPath);
+  if (!key) return;
+  try {
+    const map = loadVideoTrackPrefsMap();
+    map[key] = Object.assign({}, map[key] || {}, patch);
+    localStorage.setItem(TRACK_PREFS_STORAGE_KEY, JSON.stringify(map));
+  } catch (e) {}
+}
+
+function resolveRawVideoFilePath(src) {
+  if (!src || typeof src !== "string") return "";
+  let raw = src.trim();
+  if (raw.startsWith(BRIDGE_MEDIA_BASE + "/media?") || raw.includes("/media?")) {
+    try {
+      const u = new URL(raw, BRIDGE_MEDIA_BASE);
+      const p = u.searchParams.get("path");
+      if (p) return p;
+    } catch (e) {}
+  }
+  if (raw.startsWith("file://")) {
+    try {
+      if (typeof fileURLToPath === "function") return fileURLToPath(raw);
+    } catch (e) {}
+    try {
+      raw = decodeURIComponent(raw.replace(/^file:\/\/\/?/i, ""));
+      if (/^\/[A-Za-z]:/.test(raw)) raw = raw.slice(1);
+      return raw.replace(/\//g, "\\");
+    } catch (e) {}
+  }
+  return raw;
+}
+
+const videoTrackState = {
+  mediaPath: "",
+  mediaKey: "",
+  audioTracks: [],
+  subtitleTracks: [],
+  activeAudioIndex: 0,
+  activeSubtitleKey: "off", // "off" | "emb:<idx>" | "external"
+  externalFileName: "",
+  externalCues: [],
+  isProbing: false,
+  probeToken: 0,
+  audioSwitchToken: 0,
+  pendingAudioLoad: null,
+  altAudioReady: false
+};
+
+function isAltAudioActive() {
+  return Boolean(
+    typeof videoAltAudio !== "undefined" &&
+    videoAltAudio &&
+    videoTrackState.activeAudioIndex > 0 &&
+    videoTrackState.altAudioReady
+  );
+}
+
+function resetAltAudioElement() {
+  videoTrackState.audioSwitchToken++;
+  videoTrackState.pendingAudioLoad = null;
+  videoTrackState.altAudioReady = false;
+  if (typeof videoAltAudio !== "undefined" && videoAltAudio) {
+    try {
+      videoAltAudio.pause();
+      videoAltAudio.removeAttribute("src");
+      videoAltAudio.load();
+    } catch (e) {}
+  }
+  if (videoPlayer) {
+    videoPlayer.muted = false;
+  }
+}
+
+function formatTrackTitle(track, fallbackPrefix) {
+  const parts = [];
+  if (track.title && track.title.trim()) {
+    parts.push(track.title.trim());
+  }
+  const langLabel = track.langName && track.langName !== "Unbekannt"
+    ? track.langName
+    : (track.lang && track.lang !== "und" ? track.lang.toUpperCase() : "");
+  if (langLabel && !parts.some(p => p.toLowerCase().includes(langLabel.toLowerCase()))) {
+    parts.push(langLabel);
+  }
+  if (parts.length === 0) {
+    return `${fallbackPrefix} ${Number(track.index) + 1}`;
+  }
+  return parts.join(" · ");
+}
+
+function formatTrackSubtext(track) {
+  const tags = [];
+  if (track.lang && track.lang !== "und") tags.push(track.lang.toUpperCase());
+  if (track.codec) tags.push(track.codec.toUpperCase());
+  if (track.isDefault) tags.push("Standard");
+  if (track.isForced) tags.push("Erzwungen");
+  if (track.source === "saved") tags.push("Gesichert");
+  return tags.join(" · ") || "Standardspur";
+}
+
+function updateTracksBadges() {
+  const audioCount = videoTrackState.audioTracks.length;
+  const subCount = videoTrackState.subtitleTracks.filter(s => s.isText !== false).length + (videoTrackState.externalCues.length > 0 ? 1 : 0);
+  const activeSub = videoTrackState.activeSubtitleKey !== "off";
+  const activeAltAudio = videoTrackState.activeAudioIndex > 0;
+  const totalBadge = audioCount > 1 ? `${audioCount}🔊` : (subCount > 0 ? "CC" : "");
+
+  const quickBtn = document.getElementById("tracksQuickBtn");
+  const quickBadge = document.getElementById("tracksQuickBadge");
+  if (quickBtn) {
+    quickBtn.classList.toggle("active", activeAltAudio || activeSub);
+  }
+  if (quickBadge) {
+    if (totalBadge) {
+      quickBadge.innerText = totalBadge;
+      quickBadge.classList.remove("hidden");
+    } else {
+      quickBadge.classList.add("hidden");
+    }
+  }
+
+  const fsBtn = document.getElementById("fsTracksBtn");
+  const fsBadge = document.getElementById("fsTracksBadge");
+  if (fsBtn) {
+    fsBtn.classList.toggle("active", activeAltAudio || activeSub);
+  }
+  if (fsBadge) {
+    if (totalBadge) {
+      fsBadge.innerText = totalBadge;
+      fsBadge.classList.remove("hidden");
+    } else {
+      fsBadge.classList.add("hidden");
+    }
+  }
+
+  const summaryEl = document.getElementById("menuTracksSummary");
+  if (summaryEl) {
+    if (audioCount > 1 || subCount > 0) {
+      const pieces = [];
+      if (audioCount > 0) pieces.push(`${audioCount} Ton`);
+      if (subCount > 0) pieces.push(`${subCount} UT`);
+      summaryEl.innerText = pieces.join(" · ");
+    } else {
+      summaryEl.innerText = "";
+    }
+  }
+}
+
+function renderTracksUI() {
+  const toggleEl = document.getElementById("autoEmbeddedSubtitlesToggle");
+  if (toggleEl) {
+    toggleEl.checked = getAutoEmbeddedSubtitles();
+  }
+
+  const audioListEl = document.getElementById("audioTrackList");
+  if (audioListEl) {
+    if (videoTrackState.isProbing && videoTrackState.audioTracks.length === 0) {
+      audioListEl.innerHTML = `<div class="tracks-empty">Spuren werden analysiert…</div>`;
+    } else if (videoTrackState.audioTracks.length === 0) {
+      audioListEl.innerHTML = `<div class="tracks-empty">Standard-Tonspur aktiv</div>`;
+    } else {
+      audioListEl.innerHTML = "";
+      videoTrackState.audioTracks.forEach((tr) => {
+        const btn = document.createElement("button");
+        const isActive = videoTrackState.activeAudioIndex === tr.index;
+        const isLoading = isActive && tr.index > 0 && !videoTrackState.altAudioReady;
+        btn.className = "track-option-btn" + (isActive ? " active" : "");
+        btn.onclick = (e) => {
+          e.stopPropagation();
+          window.selectVideoAudioTrack(tr.index);
+        };
+        const badgeText = isLoading ? "Lade…" : (isActive ? "Aktiv" : `Spur ${tr.index + 1}`);
+        btn.innerHTML = `
+          <div class="track-option-main">
+            <span class="track-option-title">🔊 ${escapeHtmlTrack(formatTrackTitle(tr, "Audiospur"))}</span>
+            <span class="track-option-sub">${escapeHtmlTrack(formatTrackSubtext(tr))}</span>
+          </div>
+          <span class="track-option-badge">${escapeHtmlTrack(badgeText)}</span>
+        `;
+        audioListEl.appendChild(btn);
+      });
+    }
+  }
+
+  const subListEl = document.getElementById("subtitleTrackList");
+  if (subListEl) {
+    subListEl.innerHTML = "";
+
+    const offBtn = document.createElement("button");
+    offBtn.className = "track-option-btn" + (videoTrackState.activeSubtitleKey === "off" ? " active" : "");
+    offBtn.onclick = (e) => {
+      e.stopPropagation();
+      window.selectVideoSubtitleTrack("off");
+    };
+    offBtn.innerHTML = `
+      <div class="track-option-main">
+        <span class="track-option-title">🚫 Aus (Keine Untertitel)</span>
+      </div>
+      <span class="track-option-badge">${videoTrackState.activeSubtitleKey === "off" ? "Aktiv" : "Aus"}</span>
+    `;
+    subListEl.appendChild(offBtn);
+
+    if (videoTrackState.externalCues.length > 0) {
+      const extBtn = document.createElement("button");
+      const isExtActive = videoTrackState.activeSubtitleKey === "external";
+      extBtn.className = "track-option-btn" + (isExtActive ? " active" : "");
+      extBtn.onclick = (e) => {
+        e.stopPropagation();
+        window.selectVideoSubtitleTrack("external");
+      };
+      extBtn.innerHTML = `
+        <div class="track-option-main">
+          <span class="track-option-title">📁 ${escapeHtmlTrack(videoTrackState.externalFileName || "Externe Datei")}</span>
+          <span class="track-option-sub">Extern (${videoTrackState.externalCues.length} Zeilen)</span>
+        </div>
+        <span class="track-option-badge">${isExtActive ? "Aktiv" : "Extern"}</span>
+      `;
+      subListEl.appendChild(extBtn);
+    }
+
+    if (videoTrackState.subtitleTracks.length === 0) {
+      const emptyNote = document.createElement("div");
+      emptyNote.className = "tracks-empty";
+      emptyNote.innerText = videoTrackState.isProbing
+        ? "Suche eingebettete Untertitel…"
+        : "Keine eingebetteten Untertitel in dieser Datei";
+      subListEl.appendChild(emptyNote);
+    } else {
+      videoTrackState.subtitleTracks.forEach((sub) => {
+        const key = `emb:${sub.index}`;
+        const isActive = videoTrackState.activeSubtitleKey === key;
+        const canSelect = sub.isText !== false;
+        const btn = document.createElement("button");
+        btn.className = "track-option-btn" + (isActive ? " active" : "");
+        btn.disabled = !canSelect;
+        btn.onclick = (e) => {
+          e.stopPropagation();
+          if (canSelect) window.selectVideoSubtitleTrack(key);
+        };
+        const subMeta = canSelect
+          ? formatTrackSubtext(sub)
+          : `${formatTrackSubtext(sub)} · Bild-Untertitel (PGS/VobSub)`;
+        btn.innerHTML = `
+          <div class="track-option-main">
+            <span class="track-option-title">💬 ${escapeHtmlTrack(formatTrackTitle(sub, "Untertitel"))}</span>
+            <span class="track-option-sub">${escapeHtmlTrack(subMeta)}</span>
+          </div>
+          <span class="track-option-badge">${canSelect ? (isActive ? "Aktiv" : "Intern") : "N/A"}</span>
+        `;
+        subListEl.appendChild(btn);
+      });
+    }
+  }
+
+  updateTracksBadges();
+}
+
+function escapeHtmlTrack(str) {
+  return String(str || "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
+window.showTracksPanel = function() {
+  const main = document.getElementById("menuMain");
+  const speed = document.getElementById("speedPanel");
+  const timer = document.getElementById("sleepTimerPanel");
+  const sync = document.getElementById("syncPanel");
+  const adj = document.getElementById("videoAdjustPanel");
+  const eq = document.getElementById("equalizerPanel");
+  const tracks = document.getElementById("tracksPanel");
+  if (main) main.classList.add("hidden");
+  if (speed) speed.classList.add("hidden");
+  if (timer) timer.classList.add("hidden");
+  if (sync) sync.classList.add("hidden");
+  if (adj) adj.classList.add("hidden");
+  if (eq) eq.classList.add("hidden");
+  if (tracks) tracks.classList.remove("hidden");
+  renderTracksUI();
+};
+
+window.openTracksMenuDirect = function(e) {
+  if (e && typeof e.stopPropagation === "function") e.stopPropagation();
+  const menuEl = document.getElementById("videoMenu");
+  if (!menuEl) return;
+  const tracksEl = document.getElementById("tracksPanel");
+  const isAlreadyShowingTracks = menuEl.classList.contains("show") && tracksEl && !tracksEl.classList.contains("hidden");
+  if (isAlreadyShowingTracks) {
+    menuEl.classList.remove("show");
+  } else {
+    window.showTracksPanel();
+    menuEl.classList.add("show");
+  }
+  if (typeof wakeFullscreenHud === "function") wakeFullscreenHud();
+};
+
+window.toggleAutoEmbeddedSubtitles = function(enabled) {
+  const isOn = Boolean(enabled);
+  setAutoEmbeddedSubtitles(isOn);
+  renderTracksUI();
+  if (isOn && videoTrackState.activeSubtitleKey === "off" && videoTrackState.subtitleTracks.length > 0) {
+    const best = pickBestEmbeddedSubtitleTrack(videoTrackState.subtitleTracks);
+    if (best) {
+      window.selectVideoSubtitleTrack(`emb:${best.index}`, { silent: false });
+      return;
+    }
+  }
+  if (typeof showVideoToast === "function") {
+    showVideoToast(isOn ? "💬 MKV-Untertitel automatisch laden: AN" : "💬 MKV-Untertitel automatisch laden: AUS");
+  }
+};
+
+function pickBestEmbeddedSubtitleTrack(subTracks) {
+  const textSubs = (subTracks || []).filter(s => s.isText !== false);
+  if (textSubs.length === 0) return null;
+  const defTrack = textSubs.find(s => s.isDefault);
+  if (defTrack) return defTrack;
+  const deTrack = textSubs.find(s => /^(ger|deu|de)$/i.test(s.lang || ""));
+  if (deTrack) return deTrack;
+  return textSubs[0];
+}
+
+window.selectVideoAudioTrack = function(trackIndex, opts = {}) {
+  const idx = parseInt(trackIndex, 10) || 0;
+  const rawPath = videoTrackState.mediaPath;
+  if (!rawPath) return;
+
+  if (!opts.skipSave) {
+    saveTrackPrefs(rawPath, { audioIndex: idx });
+  }
+
+  if (idx <= 0 || typeof videoAltAudio === "undefined" || !videoAltAudio) {
+    videoTrackState.activeAudioIndex = 0;
+    resetAltAudioElement();
+    renderTracksUI();
+    if (!opts.silent && typeof showVideoToast === "function") {
+      const tr = videoTrackState.audioTracks.find(t => t.index === 0);
+      showVideoToast(`🔊 Audiospur: ${tr ? formatTrackTitle(tr, "Spur") : "Spur 1"}`);
+    }
+    return;
+  }
+
+  ensureAudioContext();
+  const token = ++videoTrackState.audioSwitchToken;
+  videoTrackState.activeAudioIndex = idx;
+  videoTrackState.altAudioReady = false;
+  videoTrackState.pendingAudioLoad = { token, trackIndex: idx, mediaPath: rawPath, silent: Boolean(opts.silent) };
+  renderTracksUI();
+
+  if (!opts.silent && typeof showVideoToast === "function") {
+    showVideoToast(`⏳ Lade Audiospur ${idx + 1}…`);
+  }
+
+  const audioUrl = `${BRIDGE_MEDIA_BASE}/media/audio?path=${encodeURIComponent(rawPath)}&track=${idx}`;
+  try {
+    videoAltAudio.pause();
+    videoAltAudio.crossOrigin = "anonymous";
+    videoAltAudio.src = audioUrl;
+    videoAltAudio.load();
+  } catch (e) {
+    console.warn("Alternativer Audio-Load fehlgeschlagen:", e);
+    videoTrackState.activeAudioIndex = 0;
+    resetAltAudioElement();
+    renderTracksUI();
+  }
+};
+
+window.selectVideoSubtitleTrack = async function(subKey, opts = {}) {
+  const rawPath = videoTrackState.mediaPath;
+  videoTrackState.activeSubtitleKey = subKey || "off";
+  if (rawPath && !opts.skipSave && subKey !== "external") {
+    saveTrackPrefs(rawPath, { subKey: videoTrackState.activeSubtitleKey });
+  }
+
+  if (subKey === "off") {
+    currentSubtitles = [];
+    updateSubtitles();
+    renderTracksUI();
+    if (!opts.silent && typeof showVideoToast === "function") {
+      showVideoToast("💬 Untertitel ausgeblendet");
+    }
+    return;
+  }
+
+  if (subKey === "external") {
+    currentSubtitles = videoTrackState.externalCues || [];
+    updateSubtitles();
+    renderTracksUI();
+    if (!opts.silent && typeof showVideoToast === "function") {
+      showVideoToast(`💬 Externe Untertitel aktiv (${currentSubtitles.length} Zeilen)`);
+    }
+    return;
+  }
+
+  if (typeof subKey === "string" && subKey.startsWith("emb:")) {
+    const idx = parseInt(subKey.slice(4), 10);
+    if (!rawPath || isNaN(idx)) return;
+    const token = videoTrackState.probeToken;
+    renderTracksUI();
+    try {
+      const resp = await fetch(`${BRIDGE_MEDIA_BASE}/media/subtitle?path=${encodeURIComponent(rawPath)}&track=${idx}`);
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      const vttText = await resp.text();
+      if (token !== videoTrackState.probeToken) return;
+      const cues = parseSubtitles(vttText);
+      currentSubtitles = cues;
+      videoTrackState.activeSubtitleKey = subKey;
+      updateSubtitles();
+      renderTracksUI();
+      if (!opts.silent && typeof showVideoToast === "function") {
+        const subMeta = videoTrackState.subtitleTracks.find(s => s.index === idx);
+        const label = subMeta ? formatTrackTitle(subMeta, "Untertitel") : `Spur ${idx + 1}`;
+        showVideoToast(`💬 Untertitel geladen: ${label} (${cues.length})`);
+      }
+    } catch (err) {
+      console.warn("Konnte eingebetteten Untertitel nicht laden:", err);
+      videoTrackState.activeSubtitleKey = "off";
+      currentSubtitles = [];
+      updateSubtitles();
+      renderTracksUI();
+      if (!opts.silent && typeof showVideoToast === "function") {
+        showVideoToast("⚠️ Untertitelspur konnte nicht geladen werden");
+      }
+    }
+  }
+};
+
+window.probeAndLoadVideoTracks = async function(explicitPath) {
+  const rawPath = explicitPath || resolveRawVideoFilePath(videoPlayer?.currentSrc || videoPlayer?.src || "");
+  if (!rawPath || /^https?:\/\//i.test(rawPath)) {
+    return;
+  }
+  const mediaKey = getMediaStemPrefKey(rawPath);
+  if (videoTrackState.mediaPath === rawPath && videoTrackState.isProbing) {
+    return;
+  }
+
+  const isNewVideo = mediaKey !== videoTrackState.mediaKey;
+  videoTrackState.mediaPath = rawPath;
+  videoTrackState.mediaKey = mediaKey;
+  videoTrackState.isProbing = true;
+  const myToken = ++videoTrackState.probeToken;
+
+  if (isNewVideo) {
+    resetAltAudioElement();
+    videoTrackState.audioTracks = [];
+    videoTrackState.subtitleTracks = [];
+    videoTrackState.activeAudioIndex = 0;
+    videoTrackState.activeSubtitleKey = "off";
+    videoTrackState.externalCues = [];
+    videoTrackState.externalFileName = "";
+    currentSubtitles = [];
+    updateSubtitles();
+  }
+  renderTracksUI();
+
+  try {
+    const resp = await fetch(`${BRIDGE_MEDIA_BASE}/api/media/tracks`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ path: rawPath })
+    });
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    const data = await resp.json();
+    if (myToken !== videoTrackState.probeToken) return;
+
+    videoTrackState.audioTracks = Array.isArray(data.audioTracks) ? data.audioTracks : [];
+    videoTrackState.subtitleTracks = Array.isArray(data.subtitleTracks) ? data.subtitleTracks : [];
+    videoTrackState.isProbing = false;
+
+    const saved = getSavedTrackPrefs(rawPath);
+
+    // 1. Gespeicherte oder Standard-Audiospur wiederherstellen
+    const desiredAudioIdx = saved && typeof saved.audioIndex === "number" ? saved.audioIndex : 0;
+    if (desiredAudioIdx > 0 && videoTrackState.audioTracks.some(t => t.index === desiredAudioIdx)) {
+      window.selectVideoAudioTrack(desiredAudioIdx, { silent: true, skipSave: true });
+    } else {
+      videoTrackState.activeAudioIndex = 0;
+      resetAltAudioElement();
+    }
+
+    // 2. Untertitel: externe nicht ueberschreiben; sonst gespeicherte Wahl oder Auto-Erkennung
+    if (videoTrackState.activeSubtitleKey !== "external") {
+      if (saved && typeof saved.subKey === "string") {
+        if (saved.subKey === "off") {
+          videoTrackState.activeSubtitleKey = "off";
+        } else if (saved.subKey.startsWith("emb:")) {
+          const idx = parseInt(saved.subKey.slice(4), 10);
+          if (videoTrackState.subtitleTracks.some(s => s.index === idx && s.isText !== false)) {
+            await window.selectVideoSubtitleTrack(saved.subKey, { silent: true, skipSave: true });
+          }
+        }
+      } else if (getAutoEmbeddedSubtitles()) {
+        const bestSub = pickBestEmbeddedSubtitleTrack(videoTrackState.subtitleTracks);
+        if (bestSub) {
+          await window.selectVideoSubtitleTrack(`emb:${bestSub.index}`, { silent: false, skipSave: true });
+        }
+      }
+    }
+
+    renderTracksUI();
+  } catch (err) {
+    if (myToken === videoTrackState.probeToken) {
+      videoTrackState.isProbing = false;
+      renderTracksUI();
+    }
+  }
+};
+
+// Synchronisation von videoAltAudio mit videoPlayer
+if (typeof videoAltAudio !== "undefined" && videoAltAudio) {
+  videoAltAudio.addEventListener("canplay", () => {
+    const pending = videoTrackState.pendingAudioLoad;
+    if (!pending || pending.token !== videoTrackState.audioSwitchToken) return;
+    if (videoTrackState.activeAudioIndex !== pending.trackIndex) return;
+    videoTrackState.pendingAudioLoad = null;
+    videoTrackState.altAudioReady = true;
+
+    videoPlayer.muted = true;
+    const volSlider = document.getElementById("volume");
+    const volVal = volSlider ? parseFloat(volSlider.value) : 1.0;
+    videoAltAudio.volume = Math.min(1.0, isNaN(volVal) ? 1.0 : volVal);
+    videoAltAudio.playbackRate = videoPlayer.playbackRate || 1.0;
+    try {
+      videoAltAudio.currentTime = videoPlayer.currentTime || 0;
+    } catch (e) {}
+
+    if (!videoPlayer.paused) {
+      ensureAudioContext();
+      videoAltAudio.play().catch(() => {});
+    }
+    renderTracksUI();
+
+    if (!pending.silent && typeof showVideoToast === "function") {
+      const tr = videoTrackState.audioTracks.find(t => t.index === pending.trackIndex);
+      showVideoToast(`🔊 Audiospur gewechselt: ${tr ? formatTrackTitle(tr, "Spur") : `Spur ${pending.trackIndex + 1}`}`);
+    }
+  });
+
+  videoAltAudio.addEventListener("error", () => {
+    const pending = videoTrackState.pendingAudioLoad;
+    if (!pending || pending.token !== videoTrackState.audioSwitchToken) return;
+    videoTrackState.pendingAudioLoad = null;
+    videoTrackState.activeAudioIndex = 0;
+    videoTrackState.altAudioReady = false;
+    videoPlayer.muted = false;
+    renderTracksUI();
+    if (!pending.silent && typeof showVideoToast === "function") {
+      showVideoToast("⚠️ Audiospur konnte nicht geladen werden – Standardspur aktiv.");
+    }
+  });
+}
+
+if (videoPlayer) {
+  videoPlayer.addEventListener("loadedmetadata", () => {
+    window.probeAndLoadVideoTracks();
+  });
+  videoPlayer.addEventListener("play", () => {
+    if (isAltAudioActive()) {
+      ensureAudioContext();
+      videoAltAudio.playbackRate = videoPlayer.playbackRate || 1.0;
+      if (Math.abs((videoAltAudio.currentTime || 0) - (videoPlayer.currentTime || 0)) > 0.12) {
+        try { videoAltAudio.currentTime = videoPlayer.currentTime || 0; } catch (e) {}
+      }
+      videoAltAudio.play().catch(() => {});
+    }
+  });
+  videoPlayer.addEventListener("playing", () => {
+    if (isAltAudioActive()) {
+      ensureAudioContext();
+      videoAltAudio.playbackRate = videoPlayer.playbackRate || 1.0;
+      if (Math.abs((videoAltAudio.currentTime || 0) - (videoPlayer.currentTime || 0)) > 0.12) {
+        try { videoAltAudio.currentTime = videoPlayer.currentTime || 0; } catch (e) {}
+      }
+      videoAltAudio.play().catch(() => {});
+    }
+  });
+  videoPlayer.addEventListener("pause", () => {
+    if (typeof videoAltAudio !== "undefined" && videoAltAudio && !videoAltAudio.paused) {
+      videoAltAudio.pause();
+    }
+  });
+  videoPlayer.addEventListener("ended", () => {
+    if (typeof videoAltAudio !== "undefined" && videoAltAudio && !videoAltAudio.paused) {
+      videoAltAudio.pause();
+    }
+  });
+  videoPlayer.addEventListener("waiting", () => {
+    if (isAltAudioActive() && !videoAltAudio.paused) {
+      videoAltAudio.pause();
+    }
+  });
+  videoPlayer.addEventListener("seeking", () => {
+    if (isAltAudioActive() && !videoAltAudio.paused) {
+      videoAltAudio.pause();
+    }
+  });
+  videoPlayer.addEventListener("seeked", () => {
+    if (isAltAudioActive()) {
+      try { videoAltAudio.currentTime = videoPlayer.currentTime || 0; } catch (e) {}
+      if (!videoPlayer.paused) {
+        videoAltAudio.playbackRate = videoPlayer.playbackRate || 1.0;
+        videoAltAudio.play().catch(() => {});
+      }
+    }
+  });
+  videoPlayer.addEventListener("ratechange", () => {
+    if (typeof videoAltAudio !== "undefined" && videoAltAudio) {
+      videoAltAudio.playbackRate = videoPlayer.playbackRate || 1.0;
+    }
+  });
+  videoPlayer.addEventListener("timeupdate", () => {
+    if (!isAltAudioActive() || videoPlayer.seeking) return;
+    const drift = Math.abs((videoAltAudio.currentTime || 0) - (videoPlayer.currentTime || 0));
+    if (drift > 0.18) {
+      try { videoAltAudio.currentTime = videoPlayer.currentTime || 0; } catch (e) {}
+    }
+    if (!videoPlayer.paused && videoAltAudio.paused && videoAltAudio.readyState >= 2) {
+      videoAltAudio.play().catch(() => {});
+    }
+  });
+}
+
+if (player) {
+  player.addEventListener("play", () => {
+    if (typeof videoAltAudio !== "undefined" && videoAltAudio && !videoAltAudio.paused) {
+      videoAltAudio.pause();
+    }
+  });
+}
+
+renderTracksUI();
+
 // Subtitle File Picker & Drag and Drop
 const subFileInput = document.getElementById("subtitleFileInput");
 if (subFileInput) {
@@ -16710,7 +17443,13 @@ if (subFileInput) {
     if (file) {
       const reader = new FileReader();
       reader.onload = (evt) => {
-        currentSubtitles = parseSubtitles(evt.target.result);
+        const parsed = parseSubtitles(evt.target.result);
+        currentSubtitles = parsed;
+        videoTrackState.externalFileName = file.name;
+        videoTrackState.externalCues = parsed;
+        videoTrackState.activeSubtitleKey = "external";
+        updateSubtitles();
+        renderTracksUI();
         showVideoToast(`💬 ${currentSubtitles.length} Untertitel geladen!`);
       };
       reader.readAsText(file);
@@ -16732,7 +17471,13 @@ if (videoContainerEl) {
       if (file.name.match(/\.(srt|vtt)$/i)) {
         const reader = new FileReader();
         reader.onload = (evt) => {
-          currentSubtitles = parseSubtitles(evt.target.result);
+          const parsed = parseSubtitles(evt.target.result);
+          currentSubtitles = parsed;
+          videoTrackState.externalFileName = file.name;
+          videoTrackState.externalCues = parsed;
+          videoTrackState.activeSubtitleKey = "external";
+          updateSubtitles();
+          renderTracksUI();
           showVideoToast(`💬 ${currentSubtitles.length} Untertitel aus "${file.name}" geladen!`);
         };
         reader.readAsText(file);

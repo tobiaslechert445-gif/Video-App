@@ -308,6 +308,7 @@ My View
 <canvas id="videoAmbient"></canvas>
 
 <video id="videoPlayer"></video>
+<audio id="videoAltAudio" crossorigin="anonymous" preload="auto" style="display:none;"></audio>
 
 <!-- SUBTITLE OVERLAY -->
 <div id="videoSubtitleOverlay" class="video-subtitle-overlay hidden">
@@ -394,6 +395,11 @@ My View
 
         <button id="fsEqBtn" class="yt-fs-icon-btn" onclick="openEqualizerModal()" title="Studio-Equalizer &amp; Sound-Mischpult (Frei beweglich)">
           <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="4" y1="21" x2="4" y2="14"></line><line x1="4" y1="10" x2="4" y2="3"></line><line x1="12" y1="21" x2="12" y2="12"></line><line x1="12" y1="8" x2="12" y2="3"></line><line x1="20" y1="21" x2="20" y2="16"></line><line x1="20" y1="12" x2="20" y2="3"></line><line x1="1" y1="14" x2="7" y2="14"></line><line x1="9" y1="8" x2="15" y2="8"></line><line x1="17" y1="16" x2="23" y2="16"></line></svg>
+        </button>
+
+        <button id="fsTracksBtn" class="yt-fs-icon-btn" onclick="openTracksMenuDirect(event)" title="Tonspur &amp; Untertitel wechseln">
+          <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="5" width="20" height="14" rx="2"></rect><path d="M7 15h4M15 15h2M7 11h2M13 11h4"></path></svg>
+          <span id="fsTracksBadge" class="fs-loop-badge hidden"></span>
         </button>
 
         <div id="fsMenuWrapper" style="position: relative; display: flex; align-items: center;">
@@ -747,6 +753,14 @@ My View
           </svg>
         </button>
 
+        <button id="tracksQuickBtn" class="ctrl-icon-btn hidden" onclick="openTracksMenuDirect(event)" title="Tonspur &amp; Untertitel wechseln" style="position: relative;">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <rect x="2" y="5" width="20" height="14" rx="2"></rect>
+            <path d="M7 15h4M15 15h2M7 11h2M13 11h4"></path>
+          </svg>
+          <span id="tracksQuickBadge" class="tracks-quick-badge hidden"></span>
+        </button>
+
         <button id="ambientBtn" class="ctrl-icon-btn hidden" title="Ambient Kino-Leuchten (Hintergrund-Glow passend zum Video)">
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
             <circle cx="12" cy="12" r="5"></circle>
@@ -800,6 +814,11 @@ My View
                 <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path></svg>
                 <span>Audio- &amp; Untertitel-Sync</span>
               </button>
+              <button class="menuItem" onclick="showTracksPanel()">
+                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="5" width="20" height="14" rx="2"></rect><path d="M7 15h4M15 15h2M7 11h2M13 11h4"></path></svg>
+                <span>Tonspur &amp; Untertitel</span>
+                <span id="menuTracksSummary" class="menu-item-meta"></span>
+              </button>
               <button class="menuItem" onclick="showVideoAdjustPanel()">
                 <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="2" ry="2"></rect><line x1="8" y1="21" x2="16" y2="21"></line><line x1="12" y1="17" x2="12" y2="21"></line></svg>
                 <span>Bild &amp; Seitenverhältnis</span>
@@ -835,6 +854,38 @@ My View
                 <button class="speed-pill" onclick="setSpeedPreset(1.25)">1.25x</button>
                 <button class="speed-pill" onclick="setSpeedPreset(1.5)">1.5x</button>
                 <button class="speed-pill" onclick="setSpeedPreset(2.0)">2.0x</button>
+              </div>
+            </div>
+
+            <!-- TRACKS & SUBTITLES PANEL -->
+            <div id="tracksPanel" class="menuSection hidden tracks-panel">
+              <div class="menuHeader" onclick="backToMenu()">← Zurück</div>
+              <div class="menuLabel">Tonspur &amp; Untertitel</div>
+
+              <div class="tracks-toggle-row">
+                <div class="tracks-toggle-text">
+                  <span class="tracks-toggle-title">MKV-Untertitel automatisch laden</span>
+                  <span class="tracks-toggle-sub">Interne Untertitel direkt erkennen &amp; synchronisieren</span>
+                </div>
+                <label class="tracks-switch">
+                  <input type="checkbox" id="autoEmbeddedSubtitlesToggle" onchange="toggleAutoEmbeddedSubtitles(this.checked)">
+                  <span class="tracks-switch-slider"></span>
+                </label>
+              </div>
+
+              <div class="tracks-section-label">🔊 Audiospur / Synchro</div>
+              <div id="audioTrackList" class="tracks-list">
+                <div class="tracks-empty">Wird erkannt…</div>
+              </div>
+
+              <div class="tracks-section-label" style="margin-top: 10px;">💬 Untertitel (Intern &amp; Extern)</div>
+              <div id="subtitleTrackList" class="tracks-list">
+                <div class="tracks-empty">Keine eingebetteten Untertitel</div>
+              </div>
+
+              <div class="tracks-footer-actions">
+                <button class="sync-file-btn" onclick="document.getElementById('subtitleFileInput').click()" style="flex: 1;">📁 Eigene .srt / .vtt laden</button>
+                <button class="sync-reset-btn" onclick="showSyncPanel()" style="flex: 0 0 auto; padding: 6px 10px;" title="Timing anpassen">⏱ Sync</button>
               </div>
             </div>
 

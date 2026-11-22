@@ -193,6 +193,8 @@ fn resolve_app_paths() -> (PathBuf, PathBuf, PathBuf, bool) {
 }
 
 static MKV_REMUX_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+static AUDIO_EXTRACT_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+static SUB_EXTRACT_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
 fn fnv1a_64(data: &[u8]) -> u64 {
     let mut hash: u64 = 0xcbf29ce484222325;
@@ -217,6 +219,280 @@ fn find_ffmpeg(media_dir: &Path) -> Option<PathBuf> {
         }
     }
     None
+}
+
+fn normalize_path_key(p: &Path) -> String {
+    p.to_string_lossy().replace('/', "\\").trim().to_lowercase()
+}
+
+fn saved_subs_dir_for_media(media_dir: &Path, media_path: &Path) -> PathBuf {
+    let parent = media_path
+        .parent()
+        .map(normalize_path_key)
+        .unwrap_or_default();
+    let stem = media_path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("")
+        .to_lowercase();
+    let key_input = format!("{}|{}", parent, stem);
+    let hash = fnv1a_64(key_input.as_bytes());
+    media_dir
+        .join(".sub_cache")
+        .join(format!("saved_{:016x}", hash))
+}
+
+fn resolve_track_source_paths(raw_path: &str) -> (Option<PathBuf>, Option<PathBuf>) {
+    let orig = PathBuf::from(raw_path);
+    let ext_lower = orig
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_lowercase();
+    if orig.is_file() {
+        let companion = if ext_lower == "mp4" || ext_lower == "m4v" {
+            let mkv_twin = orig.with_extension("mkv");
+            if mkv_twin.is_file() {
+                Some(mkv_twin)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        return (Some(orig), companion);
+    }
+    if ext_lower == "mkv" {
+        let mp4_twin = orig.with_extension("mp4");
+        if mp4_twin.is_file() {
+            return (Some(mp4_twin), None);
+        }
+    }
+    (None, None)
+}
+
+fn lang_display_name(code: &str) -> &'static str {
+    match code.trim().to_lowercase().as_str() {
+        "ger" | "deu" | "de" => "Deutsch",
+        "eng" | "en" => "Englisch",
+        "jpn" | "ja" => "Japanisch",
+        "fre" | "fra" | "fr" => "Französisch",
+        "spa" | "es" => "Spanisch",
+        "ita" | "it" => "Italienisch",
+        "por" | "pt" => "Portugiesisch",
+        "rus" | "ru" => "Russisch",
+        "kor" | "ko" => "Koreanisch",
+        "chi" | "zho" | "zh" => "Chinesisch",
+        "tur" | "tr" => "Türkisch",
+        "pol" | "pl" => "Polnisch",
+        "dut" | "nld" | "nl" => "Niederländisch",
+        "ara" | "ar" => "Arabisch",
+        "hin" | "hi" => "Hindi",
+        "und" | "" => "Unbekannt",
+        _ => "",
+    }
+}
+
+fn is_text_subtitle_codec(codec: &str) -> bool {
+    let token = codec
+        .split(|c: char| c.is_whitespace() || c == '(' || c == '[' || c == ',')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_lowercase();
+    matches!(
+        token.as_str(),
+        "subrip"
+            | "srt"
+            | "ass"
+            | "ssa"
+            | "webvtt"
+            | "vtt"
+            | "mov_text"
+            | "tx3g"
+            | "text"
+            | "microdvd"
+            | "mpl2"
+            | "realtext"
+            | "sami"
+            | "subviewer"
+            | "vplayer"
+            | "jacosub"
+    )
+}
+
+fn extract_stream_lang(header: &str) -> String {
+    if let (Some(open), Some(close)) = (header.rfind('('), header.rfind(')')) {
+        if close > open + 1 {
+            let code = header[open + 1..close].trim().to_lowercase();
+            if !code.is_empty() {
+                return code;
+            }
+        }
+    }
+    "und".to_string()
+}
+
+fn extract_stream_codec(details: &str) -> String {
+    details
+        .split(|c: char| c == ',' || c == '(' || c.is_whitespace())
+        .find(|s| !s.is_empty())
+        .unwrap_or("")
+        .to_lowercase()
+}
+
+struct ProbedTracks {
+    audio: Vec<Value>,
+    subtitles: Vec<Value>,
+}
+
+fn probe_media_tracks(media_path: &Path, media_dir: &Path) -> ProbedTracks {
+    let mut audio_entries: Vec<(usize, String, String, String, bool, bool)> = Vec::new();
+    let mut sub_entries: Vec<(usize, String, String, String, bool, bool, bool)> = Vec::new();
+
+    let Some(ffmpeg) = find_ffmpeg(media_dir) else {
+        return ProbedTracks {
+            audio: Vec::new(),
+            subtitles: Vec::new(),
+        };
+    };
+
+    let mut cmd = Command::new(&ffmpeg);
+    cmd.args(["-hide_banner", "-i", &media_path.to_string_lossy()]);
+    #[cfg(target_os = "windows")]
+    cmd.creation_flags(CREATE_NO_WINDOW);
+
+    let Ok(output) = cmd.output() else {
+        return ProbedTracks {
+            audio: Vec::new(),
+            subtitles: Vec::new(),
+        };
+    };
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    enum ActiveStream {
+        None,
+        Audio(usize),
+        Subtitle(usize),
+    }
+    let mut current = ActiveStream::None;
+
+    for raw_line in stderr.lines() {
+        let trimmed = raw_line.trim();
+        if trimmed.starts_with("Stream #") {
+            if let Some(pos) = trimmed.find(": Audio:") {
+                let idx = audio_entries.len();
+                let header = &trimmed[..pos];
+                let details = trimmed[pos + ": Audio:".len()..].trim();
+                let lang = extract_stream_lang(header);
+                let codec = extract_stream_codec(details);
+                let lower = details.to_lowercase();
+                let is_default = lower.contains("(default)");
+                let is_forced = lower.contains("(forced)");
+                audio_entries.push((idx, lang, codec, String::new(), is_default, is_forced));
+                current = ActiveStream::Audio(idx);
+            } else if let Some(pos) = trimmed.find(": Subtitle:") {
+                let idx = sub_entries.len();
+                let header = &trimmed[..pos];
+                let details = trimmed[pos + ": Subtitle:".len()..].trim();
+                let lang = extract_stream_lang(header);
+                let codec = extract_stream_codec(details);
+                let is_text = is_text_subtitle_codec(&codec);
+                let lower = details.to_lowercase();
+                let is_default = lower.contains("(default)");
+                let is_forced = lower.contains("(forced)");
+                sub_entries.push((idx, lang, codec, String::new(), is_default, is_forced, is_text));
+                current = ActiveStream::Subtitle(idx);
+            } else {
+                current = ActiveStream::None;
+            }
+            continue;
+        }
+
+        if !raw_line.starts_with("    ") {
+            current = ActiveStream::None;
+            continue;
+        }
+
+        if let Some((k, v)) = trimmed.split_once(':') {
+            if k.trim().eq_ignore_ascii_case("title") {
+                let title_val = v.trim().to_string();
+                if !title_val.is_empty() {
+                    match current {
+                        ActiveStream::Audio(i) => {
+                            if let Some(entry) = audio_entries.get_mut(i) {
+                                entry.3 = title_val;
+                            }
+                        }
+                        ActiveStream::Subtitle(i) => {
+                            if let Some(entry) = sub_entries.get_mut(i) {
+                                entry.3 = title_val;
+                            }
+                        }
+                        ActiveStream::None => {}
+                    }
+                }
+            }
+        }
+    }
+
+    let audio = audio_entries
+        .into_iter()
+        .map(|(idx, lang, codec, title, is_default, is_forced)| {
+            let disp = lang_display_name(&lang);
+            let lang_name = if !disp.is_empty() {
+                disp.to_string()
+            } else {
+                lang.to_uppercase()
+            };
+            json!({
+                "index": idx,
+                "lang": lang,
+                "langName": lang_name,
+                "codec": codec,
+                "title": title,
+                "isDefault": is_default,
+                "isForced": is_forced
+            })
+        })
+        .collect();
+
+    let subtitles = sub_entries
+        .into_iter()
+        .map(|(idx, lang, codec, title, is_default, is_forced, is_text)| {
+            let disp = lang_display_name(&lang);
+            let lang_name = if !disp.is_empty() {
+                disp.to_string()
+            } else {
+                lang.to_uppercase()
+            };
+            json!({
+                "index": idx,
+                "lang": lang,
+                "langName": lang_name,
+                "codec": codec,
+                "title": title,
+                "isDefault": is_default,
+                "isForced": is_forced,
+                "isText": is_text,
+                "source": "embedded"
+            })
+        })
+        .collect();
+
+    ProbedTracks { audio, subtitles }
+}
+
+fn file_hash_key(path: &Path, extra: &str) -> u64 {
+    let meta = fs::metadata(path).ok();
+    let len = meta.as_ref().map(|m| m.len()).unwrap_or(0);
+    let mtime_ms = meta
+        .and_then(|m| m.modified().ok())
+        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    let key_input = format!("{}|{}|{}|{}", normalize_path_key(path), len, mtime_ms, extra);
+    fnv1a_64(key_input.as_bytes())
 }
 
 fn resolve_playable_media_path(path: &Path) -> PathBuf {
@@ -283,7 +559,9 @@ fn resolve_playable_media_path(path: &Path) -> PathBuf {
             "-map",
             "0:v:0",
             "-map",
-            "0:a:0?",
+            "0:a?",
+            "-map_metadata",
+            "0",
             "-c:v",
             "copy",
             "-c:a",
@@ -315,33 +593,9 @@ fn resolve_playable_media_path(path: &Path) -> PathBuf {
     path.to_path_buf()
 }
 
-fn handle_media_stream(req: Request, url: &str) {
-    let raw_path = match parse_query_param(url, "path") {
-        Some(p) if !p.is_empty() => p,
-        _ => {
-            respond_json(req, 400, json!({ "error": "Missing path param" }));
-            return;
-        }
-    };
-
-    let orig_path = PathBuf::from(&raw_path);
-    let path = if orig_path.is_file() {
-        resolve_playable_media_path(&orig_path)
-    } else if orig_path
-        .extension()
-        .and_then(|e| e.to_str())
-        .map(|e| e.eq_ignore_ascii_case("mkv"))
-        .unwrap_or(false)
-        && orig_path.with_extension("mp4").is_file()
-    {
-        orig_path.with_extension("mp4")
-    } else {
-        respond_json(req, 404, json!({ "error": "Media file not found" }));
-        return;
-    };
-
-    let mime = guess_mime(&path);
-    let mut file = match File::open(&path) {
+fn serve_file_with_ranges(req: Request, path: &Path) {
+    let mime = guess_mime(path);
+    let mut file = match File::open(path) {
         Ok(f) => f,
         Err(e) => {
             respond_json(req, 500, json!({ "error": e.to_string() }));
@@ -430,6 +684,380 @@ fn handle_media_stream(req: Request, url: &str) {
         resp.add_header(h);
     }
     let _ = req.respond(resp);
+}
+
+fn handle_media_stream(req: Request, url: &str) {
+    let raw_path = match parse_query_param(url, "path") {
+        Some(p) if !p.is_empty() => p,
+        _ => {
+            respond_json(req, 400, json!({ "error": "Missing path param" }));
+            return;
+        }
+    };
+
+    let orig_path = PathBuf::from(&raw_path);
+    let path = if orig_path.is_file() {
+        resolve_playable_media_path(&orig_path)
+    } else if orig_path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.eq_ignore_ascii_case("mkv"))
+        .unwrap_or(false)
+        && orig_path.with_extension("mp4").is_file()
+    {
+        orig_path.with_extension("mp4")
+    } else {
+        respond_json(req, 404, json!({ "error": "Media file not found" }));
+        return;
+    };
+
+    serve_file_with_ranges(req, &path);
+}
+
+fn handle_media_audio_stream(req: Request, url: &str) {
+    let raw_path = match parse_query_param(url, "path") {
+        Some(p) if !p.is_empty() => p,
+        _ => {
+            respond_json(req, 400, json!({ "error": "Missing path param" }));
+            return;
+        }
+    };
+    let track: usize = match parse_query_param(url, "track").and_then(|t| t.parse().ok()) {
+        Some(t) if t < 32 => t,
+        _ => {
+            respond_json(req, 400, json!({ "error": "Invalid track param" }));
+            return;
+        }
+    };
+
+    let (primary_opt, companion_opt) = resolve_track_source_paths(&raw_path);
+    let Some(primary) = primary_opt else {
+        respond_json(req, 404, json!({ "error": "Media file not found" }));
+        return;
+    };
+
+    let (_app_dir, media_dir, _exe, _pkg) = resolve_app_paths();
+    let audio_src = if let Some(ref companion) = companion_opt {
+        let primary_probe = probe_media_tracks(&primary, &media_dir);
+        if track < primary_probe.audio.len() {
+            primary.clone()
+        } else {
+            companion.clone()
+        }
+    } else {
+        primary.clone()
+    };
+
+    let hash = file_hash_key(&audio_src, &format!("a{}", track));
+    let cache_dir = media_dir.join(".mkv_cache");
+    let cache_m4a = cache_dir.join(format!("audio_{:016x}_t{}.m4a", hash, track));
+
+    if cache_m4a.is_file() && fs::metadata(&cache_m4a).map(|m| m.len() > 128).unwrap_or(false) {
+        serve_file_with_ranges(req, &cache_m4a);
+        return;
+    }
+
+    let lock = AUDIO_EXTRACT_LOCK.get_or_init(|| Mutex::new(()));
+    let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
+
+    if cache_m4a.is_file() && fs::metadata(&cache_m4a).map(|m| m.len() > 128).unwrap_or(false) {
+        serve_file_with_ranges(req, &cache_m4a);
+        return;
+    }
+
+    let Some(ffmpeg) = find_ffmpeg(&media_dir) else {
+        respond_json(req, 500, json!({ "error": "ffmpeg.exe nicht gefunden" }));
+        return;
+    };
+
+    let _ = fs::create_dir_all(&cache_dir);
+    let tmp_m4a = cache_dir.join(format!("audio_{:016x}_t{}.tmp.m4a", hash, track));
+    let _ = fs::remove_file(&tmp_m4a);
+
+    let map_arg = format!("0:a:{}", track);
+    let mut cmd = Command::new(&ffmpeg);
+    cmd.args([
+        "-nostdin",
+        "-err_detect",
+        "ignore_err",
+        "-fflags",
+        "+genpts",
+        "-i",
+        &audio_src.to_string_lossy(),
+        "-vn",
+        "-sn",
+        "-dn",
+        "-map",
+        &map_arg,
+        "-c:a",
+        "aac",
+        "-b:a",
+        "256k",
+        "-ac",
+        "2",
+        "-movflags",
+        "+faststart",
+        "-y",
+        &tmp_m4a.to_string_lossy(),
+    ]);
+    #[cfg(target_os = "windows")]
+    cmd.creation_flags(CREATE_NO_WINDOW);
+
+    if let Ok(output) = cmd.output() {
+        if output.status.success() && fs::metadata(&tmp_m4a).map(|m| m.len() > 128).unwrap_or(false) {
+            if fs::rename(&tmp_m4a, &cache_m4a).is_ok() && cache_m4a.is_file() {
+                serve_file_with_ranges(req, &cache_m4a);
+                return;
+            }
+        }
+    }
+    let _ = fs::remove_file(&tmp_m4a);
+    respond_json(req, 500, json!({ "error": "Audio track extraction failed" }));
+}
+
+fn handle_media_subtitle_stream(req: Request, url: &str) {
+    let raw_path = match parse_query_param(url, "path") {
+        Some(p) if !p.is_empty() => p,
+        _ => {
+            respond_json(req, 400, json!({ "error": "Missing path param" }));
+            return;
+        }
+    };
+    let track: usize = match parse_query_param(url, "track").and_then(|t| t.parse().ok()) {
+        Some(t) if t < 32 => t,
+        _ => {
+            respond_json(req, 400, json!({ "error": "Invalid track param" }));
+            return;
+        }
+    };
+
+    let (_app_dir, media_dir, _exe, _pkg) = resolve_app_paths();
+    let saved_dir = saved_subs_dir_for_media(&media_dir, Path::new(&raw_path));
+    let saved_vtt = saved_dir.join(format!("sub_{}.vtt", track));
+    if saved_vtt.is_file() && fs::metadata(&saved_vtt).map(|m| m.len() > 10).unwrap_or(false) {
+        serve_file_with_ranges(req, &saved_vtt);
+        return;
+    }
+
+    let (primary_opt, companion_opt) = resolve_track_source_paths(&raw_path);
+    let Some(primary) = primary_opt else {
+        respond_json(req, 404, json!({ "error": "Media file not found" }));
+        return;
+    };
+
+    let sub_src = if let Some(ref companion) = companion_opt {
+        let primary_probe = probe_media_tracks(&primary, &media_dir);
+        if track < primary_probe.subtitles.len() {
+            primary.clone()
+        } else {
+            companion.clone()
+        }
+    } else {
+        primary.clone()
+    };
+
+    let hash = file_hash_key(&sub_src, &format!("s{}", track));
+    let cache_dir = media_dir.join(".sub_cache");
+    let cache_vtt = cache_dir.join(format!("sub_{:016x}_s{}.vtt", hash, track));
+
+    if cache_vtt.is_file() && fs::metadata(&cache_vtt).map(|m| m.len() > 10).unwrap_or(false) {
+        serve_file_with_ranges(req, &cache_vtt);
+        return;
+    }
+
+    let lock = SUB_EXTRACT_LOCK.get_or_init(|| Mutex::new(()));
+    let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
+
+    if cache_vtt.is_file() && fs::metadata(&cache_vtt).map(|m| m.len() > 10).unwrap_or(false) {
+        serve_file_with_ranges(req, &cache_vtt);
+        return;
+    }
+
+    let Some(ffmpeg) = find_ffmpeg(&media_dir) else {
+        respond_json(req, 500, json!({ "error": "ffmpeg.exe nicht gefunden" }));
+        return;
+    };
+
+    let _ = fs::create_dir_all(&cache_dir);
+    let tmp_vtt = cache_dir.join(format!("sub_{:016x}_s{}.tmp.vtt", hash, track));
+    let _ = fs::remove_file(&tmp_vtt);
+
+    let map_arg = format!("0:s:{}", track);
+    let mut cmd = Command::new(&ffmpeg);
+    cmd.args([
+        "-nostdin",
+        "-err_detect",
+        "ignore_err",
+        "-i",
+        &sub_src.to_string_lossy(),
+        "-map",
+        &map_arg,
+        "-c:s",
+        "webvtt",
+        "-y",
+        &tmp_vtt.to_string_lossy(),
+    ]);
+    #[cfg(target_os = "windows")]
+    cmd.creation_flags(CREATE_NO_WINDOW);
+
+    if let Ok(output) = cmd.output() {
+        if output.status.success() && fs::metadata(&tmp_vtt).map(|m| m.len() > 10).unwrap_or(false) {
+            if fs::rename(&tmp_vtt, &cache_vtt).is_ok() && cache_vtt.is_file() {
+                serve_file_with_ranges(req, &cache_vtt);
+                return;
+            }
+        }
+    }
+    let _ = fs::remove_file(&tmp_vtt);
+    respond_json(req, 500, json!({ "error": "Subtitle track extraction failed" }));
+}
+
+fn handle_media_tracks_api(req: Request, body: Value) {
+    let raw_path = body.get("path").and_then(|v| v.as_str()).unwrap_or("");
+    if raw_path.is_empty() {
+        respond_json(req, 400, json!({ "error": "Missing path" }));
+        return;
+    }
+
+    let (primary_opt, companion_opt) = resolve_track_source_paths(raw_path);
+    let Some(primary) = primary_opt else {
+        respond_json(req, 404, json!({ "error": "Media file not found" }));
+        return;
+    };
+
+    let (_app_dir, media_dir, _exe, _pkg) = resolve_app_paths();
+    let mut probed = probe_media_tracks(&primary, &media_dir);
+
+    if let Some(ref companion) = companion_opt {
+        let comp_probed = probe_media_tracks(companion, &media_dir);
+        if comp_probed.audio.len() > probed.audio.len() {
+            probed.audio = comp_probed.audio;
+        }
+        if probed.subtitles.is_empty() && !comp_probed.subtitles.is_empty() {
+            probed.subtitles = comp_probed.subtitles;
+        }
+    }
+
+    if probed.subtitles.is_empty() {
+        let saved_dir = saved_subs_dir_for_media(&media_dir, Path::new(raw_path));
+        let manifest_path = saved_dir.join("manifest.json");
+        if let Ok(txt) = fs::read_to_string(&manifest_path) {
+            if let Ok(Value::Array(arr)) = serde_json::from_str::<Value>(&txt) {
+                if !arr.is_empty() {
+                    probed.subtitles = arr;
+                }
+            }
+        }
+    }
+
+    respond_json(
+        req,
+        200,
+        json!({
+            "ok": true,
+            "path": raw_path,
+            "resolvedPath": primary.to_string_lossy().to_string(),
+            "audioTracks": probed.audio,
+            "subtitleTracks": probed.subtitles
+        }),
+    );
+}
+
+fn handle_extract_subtitles_api(req: Request, body: Value) {
+    let raw_path = body.get("path").and_then(|v| v.as_str()).unwrap_or("");
+    if raw_path.is_empty() {
+        respond_json(req, 400, json!({ "error": "Missing path" }));
+        return;
+    }
+
+    let src_path = {
+        let direct = PathBuf::from(raw_path);
+        if direct.is_file() {
+            direct
+        } else if let (Some(primary), _) = resolve_track_source_paths(raw_path) {
+            primary
+        } else {
+            respond_json(req, 404, json!({ "error": "Media file not found" }));
+            return;
+        }
+    };
+
+    let (_app_dir, media_dir, _exe, _pkg) = resolve_app_paths();
+    let probed = probe_media_tracks(&src_path, &media_dir);
+    let saved_dir = saved_subs_dir_for_media(&media_dir, Path::new(raw_path));
+
+    let Some(ffmpeg) = find_ffmpeg(&media_dir) else {
+        respond_json(req, 200, json!({ "ok": false, "count": 0, "error": "ffmpeg missing" }));
+        return;
+    };
+
+    let lock = SUB_EXTRACT_LOCK.get_or_init(|| Mutex::new(()));
+    let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
+    let _ = fs::create_dir_all(&saved_dir);
+
+    let mut manifest_entries: Vec<Value> = Vec::new();
+    for item in probed.subtitles {
+        let is_text = item.get("isText").and_then(|v| v.as_bool()).unwrap_or(false);
+        if !is_text {
+            continue;
+        }
+        let Some(idx) = item.get("index").and_then(|v| v.as_u64()) else {
+            continue;
+        };
+        let vtt_name = format!("sub_{}.vtt", idx);
+        let out_vtt = saved_dir.join(&vtt_name);
+        let tmp_vtt = saved_dir.join(format!("sub_{}.tmp.vtt", idx));
+        let _ = fs::remove_file(&tmp_vtt);
+
+        let map_arg = format!("0:s:{}", idx);
+        let mut cmd = Command::new(&ffmpeg);
+        cmd.args([
+            "-nostdin",
+            "-err_detect",
+            "ignore_err",
+            "-i",
+            &src_path.to_string_lossy(),
+            "-map",
+            &map_arg,
+            "-c:s",
+            "webvtt",
+            "-y",
+            &tmp_vtt.to_string_lossy(),
+        ]);
+        #[cfg(target_os = "windows")]
+        cmd.creation_flags(CREATE_NO_WINDOW);
+
+        if let Ok(output) = cmd.output() {
+            if output.status.success() && fs::metadata(&tmp_vtt).map(|m| m.len() > 10).unwrap_or(false) {
+                let _ = fs::rename(&tmp_vtt, &out_vtt);
+                if out_vtt.is_file() {
+                    let mut entry = item.clone();
+                    if let Some(obj) = entry.as_object_mut() {
+                        obj.insert("source".to_string(), json!("saved"));
+                        obj.insert("file".to_string(), json!(vtt_name));
+                    }
+                    manifest_entries.push(entry);
+                }
+            }
+        }
+        let _ = fs::remove_file(&tmp_vtt);
+    }
+
+    let manifest_path = saved_dir.join("manifest.json");
+    if let Ok(serialized) = serde_json::to_string_pretty(&manifest_entries) {
+        let _ = fs::write(&manifest_path, serialized);
+    }
+
+    respond_json(
+        req,
+        200,
+        json!({
+            "ok": true,
+            "count": manifest_entries.len(),
+            "savedDir": saved_dir.to_string_lossy().to_string(),
+            "subtitleTracks": manifest_entries
+        }),
+    );
 }
 
 fn read_json_body(req: &mut Request) -> Value {
@@ -1771,6 +2399,16 @@ fn start_bridge_server(app: AppHandle) {
                 continue;
             }
 
+            if path_only == "/media/audio" {
+                thread::spawn(move || handle_media_audio_stream(req, &url));
+                continue;
+            }
+
+            if path_only == "/media/subtitle" {
+                thread::spawn(move || handle_media_subtitle_stream(req, &url));
+                continue;
+            }
+
             if path_only == "/twitch" {
                 let ch = parse_query_param(&url, "channel").unwrap_or_default();
                 let html = format!(
@@ -1858,6 +2496,12 @@ fn start_bridge_server(app: AppHandle) {
                 "/api/updater" => {
                     let app_c = app.clone();
                     thread::spawn(move || handle_updater_api(req, &app_c, body));
+                }
+                "/api/media/tracks" => {
+                    thread::spawn(move || handle_media_tracks_api(req, body));
+                }
+                "/api/media/extract_subtitles" => {
+                    thread::spawn(move || handle_extract_subtitles_api(req, body));
                 }
                 _ => respond_json(req, 404, json!({ "error": "Not Found" })),
             }
